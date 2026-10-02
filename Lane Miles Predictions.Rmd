@@ -1,0 +1,376 @@
+---
+title: "LaneMiles_models"
+output: html_document
+date: "2026-06-05"
+---
+
+##Section 1: Library Loading
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("lfe")
+library("dplyr")
+library("ggplot2")
+library("tidyr")
+library("tidycensus")
+library("sf")
+library("tidyverse")
+library("tibble")
+library("lubridate")
+library("psych")
+library("broom")
+library("lmtest")
+library("plm")
+library("tinytex")
+library("modelsummary")
+library("scales")
+library("stargazer")
+library("foreign")
+library("readxl")
+library("units")
+library("ipumsr")
+library("plm")
+
+```
+
+##Section 2: Read Databases
+This section reads and arranges the data that we clean and prepared from the previous R markdown file. It's reading a dataset where each row is a County by year and by type of road (IH = Interstate Highway; MRU: Major Road Urban). Data on VMT for Caltrans PRD is given in the thousand miles, so it's being multiplied by 1000 to have it in the same units as pre 2003 numbers. It's then inflating previous household income numbers to have the same base year as 2020.
+```{r, results = FALSE, warning=FALSE}
+
+#Set working directory
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+hpms_ipums <- read.csv("2_Data Cleaning/Code_Output/hpms_ipums_counties_8323_2026.csv")
+
+hpms_ipums[ , 6:17] <- lapply(hpms_ipums[ , 6:17], as.numeric)
+hpms_ipums[ , 19:21] <- lapply(hpms_ipums[ , 19:21], as.numeric)
+
+hpms_ipums2 <- hpms_ipums %>%
+  mutate(vmt_prd = ifelse(year >=2003, vmt_prd*1000, vmt_prd), vmt_fhwa = ifelse(year >=2003 & f_system == "ih", vmt_fhwa*1000, vmt_fhwa), hh_incr = ifelse(year == 1983, median_household_income*3.0593, ifelse(year == 1993, median_household_income*2.1087,ifelse(year == 2003, median_household_income*1.6560,ifelse(year == 2013, median_household_income*1.3080, median_household_income))))) #Need to review $ year to inflate historical value
+
+
+hpms_ipums2 <- hpms_ipums2 %>%
+  #filter(!is.na(vmt_fhwa)) %>%
+  #filter(vmt_prd > 0) %>%
+  rename(emp = s_emp,
+         poverty = s_poverty)
+
+
+hpms_ipums$year <- as.numeric(as.character(hpms_ipums$year))
+hpms_ipums2$year <- as.numeric(as.character(hpms_ipums2$year))
+hpms_ipums$county_fips <- as.factor(hpms_ipums$county_fips)
+hpms_ipums2$county_fips <- as.factor(hpms_ipums2$county_fips)
+
+hpms_ih <- hpms_ipums2 %>% filter(f_system == "ih") 
+hpms_mru <- hpms_ipums2 %>% filter(f_system == "mru")
+
+hpms_ih_fe <- pdata.frame(hpms_ih, index = c("county_fips", "year"))
+hpms_mru_fe <- pdata.frame(hpms_mru, index = c("county_fips", "year"))
+
+
+```
+
+## Section 3: Models with socioeconomic variables
+##Model Fixed Effects (PRD no 83-93 data)
+```{r, results = FALSE}
+hpms_ih_fe_prd <- hpms_ih_fe %>% 
+  filter(year %in% c("2003", "2013", "2023")) %>%
+  filter(!is.na(vmt_prd))
+
+hpms_mru_fe_prd <- hpms_mru_fe %>% 
+  filter(year %in% c("2003", "2013", "2023"))%>%
+  filter(!is.na(vmt_prd))
+
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp + log(drivers_licence) + log(total_veh), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp + log(drivers_licence) + log(total_veh), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = hpms_fe_ih_prd,
+  "(2)" = hpms_fe_ih_prd_pop,
+  "(3)" = hpms_fe_ih_prd_sc,
+  "(4)" = hpms_fe_ih_prd_county,
+  "(5)" = hpms_fe_ih_prd_pop_county,
+  "(6)" = hpms_fe_ih_prd_sc_county)
+
+MRU_models <- list(
+  "(1)" = hpms_fe_mru_prd,
+  "(2)" = hpms_fe_mru_prd_pop,
+  "(3)" = hpms_fe_mru_prd_sc,
+  "(4)" = hpms_fe_mru_prd_county,
+  "(5)" = hpms_fe_mru_prd_pop_county,
+  "(6)" = hpms_fe_mru_prd_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+
+```
+
+#Predictions for PRD models
+```{r, results = FALSE}
+#Predict regressions with only time fixed effects for IH models
+hpms_ih_fe_prd_panel <- pdata.frame(
+  hpms_ih_fe_prd %>%
+    select(-urban_pop_share, -median_household_income, -ct_yr2, -ua_pop) %>%
+    filter(!is.na(vmt_prd), vmt_prd > 0),
+  index = c("county_fips", "year")
+)
+
+pred_vals1 <- predict(hpms_fe_ih_prd, newdata = hpms_ih_fe_prd_panel)
+pred_vals2 <- predict(hpms_fe_ih_prd_pop, newdata = hpms_ih_fe_prd_panel)  
+pred_vals3 <- predict(hpms_fe_ih_prd_sc, newdata = hpms_ih_fe_prd_panel)
+pred_vals4 <- predict(hpms_fe_ih_prd_county, newdata = hpms_ih_fe_prd_panel)
+pred_vals5 <- predict(hpms_fe_ih_prd_pop_county, newdata = hpms_ih_fe_prd_panel)  
+pred_vals6 <- predict(hpms_fe_ih_prd_sc_county, newdata = hpms_ih_fe_prd_panel)
+
+# Attach predictions to your dataframe
+hpms_ih_fe_prd_panel$hpms_fe_prd <- exp(as.numeric(pred_vals1))
+hpms_ih_fe_prd_panel$hpms_fe_prd_pop <- exp(as.numeric(pred_vals2))
+hpms_ih_fe_prd_panel$hpms_fe_prd_sc <- exp(as.numeric(pred_vals3))
+hpms_ih_fe_prd_panel$hpms_fe_prd_county <- exp(as.numeric(pred_vals4))
+hpms_ih_fe_prd_panel$hpms_fe_prd_pop_county <- exp(as.numeric(pred_vals5))
+hpms_ih_fe_prd_panel$hpms_fe_prd_sc_county <- exp(as.numeric(pred_vals6))
+
+
+#Predict regressions with only time fixed effects for MRU models
+hpms_mru_fe_prd_panel <- hpms_mru_fe_prd %>%
+  select(-urban_pop_share, -median_household_income, -ct_yr2, -ua_pop) %>%
+  filter(!is.na(vmt_prd)) %>%
+  filter(vmt_prd > 0)
+
+# Convert data to pdata.frame using SAME index used in model estimation
+new_pdf_mru <- pdata.frame(hpms_mru_fe_prd_panel, index = c("county_fips", "year"))
+
+pred_vals1 <- predict(hpms_fe_mru_prd, newdata = new_pdf_mru)
+pred_vals2 <- predict(hpms_fe_mru_prd_pop, newdata = new_pdf_mru)  
+pred_vals3 <- predict(hpms_fe_mru_prd_sc, newdata = new_pdf_mru)
+pred_vals4 <- predict(hpms_fe_mru_prd_county, newdata = new_pdf_mru)
+pred_vals5 <- predict(hpms_fe_mru_prd_pop_county, newdata = new_pdf_mru)  
+pred_vals6 <- predict(hpms_fe_mru_prd_sc_county, newdata = new_pdf_mru)
+
+# Attach predictions to your data frame
+hpms_mru_fe_prd_panel$hpms_fe_prd <- exp(as.numeric(pred_vals1))
+hpms_mru_fe_prd_panel$hpms_fe_prd_pop <- exp(as.numeric(pred_vals2))
+hpms_mru_fe_prd_panel$hpms_fe_prd_sc <- exp(as.numeric(pred_vals3))
+hpms_mru_fe_prd_panel$hpms_fe_prd_county <- exp(as.numeric(pred_vals4))
+hpms_mru_fe_prd_panel$hpms_fe_prd_pop_county <- exp(as.numeric(pred_vals5))
+hpms_mru_fe_prd_panel$hpms_fe_prd_sc_county <- exp(as.numeric(pred_vals6))
+
+
+#Estimate Residuals
+hpms_ih_fe_prd_panel$resid_ih_1 <- residuals(hpms_fe_ih_prd)
+hpms_ih_fe_prd_panel$resid_ih_2 <- residuals(hpms_fe_ih_prd_pop)
+hpms_ih_fe_prd_panel$resid_ih_3 <- residuals(hpms_fe_ih_prd_sc)
+hpms_ih_fe_prd_panel$resid_ih_4 <- residuals(hpms_fe_ih_prd_county)
+hpms_ih_fe_prd_panel$resid_ih_5 <- residuals(hpms_fe_ih_prd_pop_county)
+hpms_ih_fe_prd_panel$resid_ih_6 <- residuals(hpms_fe_ih_prd_sc_county)
+
+
+hpms_mru_fe_prd_panel$resid_ih_1 <- residuals(hpms_fe_mru_prd)
+hpms_mru_fe_prd_panel$resid_ih_2 <- residuals(hpms_fe_mru_prd_pop)
+hpms_mru_fe_prd_panel$resid_ih_3 <- residuals(hpms_fe_mru_prd_sc)
+hpms_mru_fe_prd_panel$resid_ih_4 <- residuals(hpms_fe_mru_prd_county)
+hpms_mru_fe_prd_panel$resid_ih_5 <- residuals(hpms_fe_mru_prd_pop_county)
+hpms_mru_fe_prd_panel$resid_ih_6 <- residuals(hpms_fe_mru_prd_sc_county)
+
+hpms_prd_fe_panel <- rbind(hpms_ih_fe_prd_panel, hpms_mru_fe_prd_panel)
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+path_out <- "4_Outputs"
+write.csv(hpms_prd_fe_panel, file.path(path_out, "hpms_prd_fe_pred.csv"), row.names=FALSE)
+
+```
+
+## Section 3: Models with socioeconomic variables
+##Model Fixed Effects (FHWA)
+```{r, results = FALSE}
+hpms_ih_fe_fhwa <- pdata.frame(hpms_ih_fe_prd, index = c("county_fips", "year"))
+hpms_mru_fe_fhwa <- pdata.frame(hpms_mru_fe_prd, index = c("county_fips", "year"))
+
+hpms_fe_ih_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp + log(drivers_licence) + log(total_veh), data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp + log(drivers_licence) + log(total_veh), data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_ih_fe_fhwa[hpms_ih_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_fhwa[hpms_mru_fe_fhwa$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = hpms_fe_ih_fhwa,
+  "(2)" = hpms_fe_ih_fhwa_pop,
+  "(3)" = hpms_fe_ih_fhwa_sc,
+  "(4)" = hpms_fe_ih_fhwa_county,
+  "(5)" = hpms_fe_ih_fhwa_pop_county,
+  "(6)" = hpms_fe_ih_fhwa_sc_county)
+
+MRU_models <- list(
+  "(1)" = hpms_fe_mru_fhwa,
+  "(2)" = hpms_fe_mru_fhwa_pop,
+  "(3)" = hpms_fe_mru_fhwa_sc,
+  "(4)" = hpms_fe_mru_fhwa_county,
+  "(5)" = hpms_fe_mru_fhwa_pop_county,
+  "(6)" = hpms_fe_mru_fhwa_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans fhwa")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans fhwa")
+
+```
+
+#Predictions for PRD models
+```{r, results = FALSE}
+#Predict regressions with only time fixed effects for IH models
+hpms_ih_fe_fhwa_panel <- pdata.frame(
+  hpms_ih_fe_fhwa %>%
+    select(-urban_pop_share, -median_household_income, -ct_yr2, -ua_pop) %>%
+    filter(!is.na(vmt_fhwa), vmt_fhwa > 0),
+  index = c("county_fips", "year")
+)
+
+pred_vals1 <- predict(hpms_fe_ih_fhwa, newdata = hpms_ih_fe_fhwa_panel)
+pred_vals2 <- predict(hpms_fe_ih_fhwa_pop, newdata = hpms_ih_fe_fhwa_panel)  
+pred_vals3 <- predict(hpms_fe_ih_fhwa_sc, newdata = hpms_ih_fe_fhwa_panel)
+pred_vals4 <- predict(hpms_fe_ih_fhwa_county, newdata = hpms_ih_fe_fhwa_panel)
+pred_vals5 <- predict(hpms_fe_ih_fhwa_pop_county, newdata = hpms_ih_fe_fhwa_panel)  
+pred_vals6 <- predict(hpms_fe_ih_fhwa_sc_county, newdata = hpms_ih_fe_fhwa_panel)
+
+# Attach predictions to your dataframe
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa <- exp(as.numeric(pred_vals1))
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa_pop <- exp(as.numeric(pred_vals2))
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa_sc <- exp(as.numeric(pred_vals3))
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa_county <- exp(as.numeric(pred_vals4))
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa_pop_county <- exp(as.numeric(pred_vals5))
+hpms_ih_fe_fhwa_panel$hpms_fe_fhwa_sc_county <- exp(as.numeric(pred_vals6))
+
+
+#Predict regressions with only time fixed effects for MRU models
+hpms_mru_fe_fhwa_panel <- hpms_mru_fe_fhwa %>%
+  select(-urban_pop_share, -median_household_income, -ct_yr2, -ua_pop) %>%
+  filter(!is.na(vmt_fhwa)) %>%
+  filter(vmt_fhwa > 0)
+
+# Convert data to pdata.frame using SAME index used in model estimation
+new_pdf_mru <- pdata.frame(hpms_mru_fe_fhwa_panel, index = c("county_fips", "year"))
+
+pred_vals1 <- predict(hpms_fe_mru_fhwa, newdata = new_pdf_mru)
+pred_vals2 <- predict(hpms_fe_mru_fhwa_pop, newdata = new_pdf_mru)  
+pred_vals3 <- predict(hpms_fe_mru_fhwa_sc, newdata = new_pdf_mru)
+pred_vals4 <- predict(hpms_fe_mru_fhwa_county, newdata = new_pdf_mru)
+pred_vals5 <- predict(hpms_fe_mru_fhwa_pop_county, newdata = new_pdf_mru)  
+pred_vals6 <- predict(hpms_fe_mru_fhwa_sc_county, newdata = new_pdf_mru)
+
+# Attach predictions to your data frame
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa <- exp(as.numeric(pred_vals1))
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa_pop <- exp(as.numeric(pred_vals2))
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa_sc <- exp(as.numeric(pred_vals3))
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa_county <- exp(as.numeric(pred_vals4))
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa_pop_county <- exp(as.numeric(pred_vals5))
+hpms_mru_fe_fhwa_panel$hpms_fe_fhwa_sc_county <- exp(as.numeric(pred_vals6))
+
+
+#Estimate Residuals
+hpms_ih_fe_fhwa_panel$resid_ih_1 <- residuals(hpms_fe_ih_fhwa)
+hpms_ih_fe_fhwa_panel$resid_ih_2 <- residuals(hpms_fe_ih_fhwa_pop)
+hpms_ih_fe_fhwa_panel$resid_ih_3 <- residuals(hpms_fe_ih_fhwa_sc)
+hpms_ih_fe_fhwa_panel$resid_ih_4 <- residuals(hpms_fe_ih_fhwa_county)
+hpms_ih_fe_fhwa_panel$resid_ih_5 <- residuals(hpms_fe_ih_fhwa_pop_county)
+hpms_ih_fe_fhwa_panel$resid_ih_6 <- residuals(hpms_fe_ih_fhwa_sc_county)
+
+
+hpms_mru_fe_fhwa_panel$resid_ih_1 <- residuals(hpms_fe_mru_fhwa)
+hpms_mru_fe_fhwa_panel$resid_ih_2 <- residuals(hpms_fe_mru_fhwa_pop)
+hpms_mru_fe_fhwa_panel$resid_ih_3 <- residuals(hpms_fe_mru_fhwa_sc)
+hpms_mru_fe_fhwa_panel$resid_ih_4 <- residuals(hpms_fe_mru_fhwa_county)
+hpms_mru_fe_fhwa_panel$resid_ih_5 <- residuals(hpms_fe_mru_fhwa_pop_county)
+hpms_mru_fe_fhwa_panel$resid_ih_6 <- residuals(hpms_fe_mru_fhwa_sc_county)
+
+hpms_fhwa_fe_panel <- rbind(hpms_ih_fe_fhwa_panel, hpms_mru_fe_fhwa_panel)
+
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+path_out <- "4_Outputs"
+write.csv(hpms_fhwa_fe_panel, file.path(path_out, "hpms_fhwa_fe_pred.csv"), row.names=FALSE)
+
+```
+
+
+

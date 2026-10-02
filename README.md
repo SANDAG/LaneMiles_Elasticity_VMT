@@ -1,1 +1,2 @@
-# LaneMiles_Elasticity_VMT
+# LaneMiles_VMT_Elasticity
+Estimation of lane miles elasticity

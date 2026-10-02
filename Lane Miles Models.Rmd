@@ -1,0 +1,1053 @@
+---
+title: "LaneMiles_models"
+output: html_document
+date: "2026-06-05"
+---
+
+##Section 1: Library Loading
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("lfe")
+library("dplyr")
+library("ggplot2")
+library("tidyr")
+library("tidycensus")
+library("sf")
+library("tidyverse")
+library("tibble")
+library("lubridate")
+library("psych")
+library("broom")
+library("lmtest")
+library("plm")
+library("tinytex")
+library("modelsummary")
+library("scales")
+library("stargazer")
+library("foreign")
+library("readxl")
+library("units")
+library("ipumsr")
+library("plm")
+
+```
+
+##Section 2: Read Databases
+This section reads and arranges the data that we clean and prepared from the previous R markdown file. It's reading a dataset where each row is a County by year and by type of road (IH = Interstate Highway; MRU: Major Road Urban). Data on VMT for Caltrans PRD is given in the thousand miles, so it's being multiplied by 1000 to have it in the same units as pre 2003 numbers. It's then inflating previous household income numbers to have the same base year as 2020.
+```{r, results = FALSE, warning=FALSE}
+
+#Set working directory
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+hpms_ipums <- read.csv("2_Data Cleaning/Code_Output/hpms_ipums_counties_8323_2026.csv")
+
+hpms_ipums[ , 6:19] <- lapply(hpms_ipums[ , 6:19], as.numeric)
+
+hpms_ipums2 <- hpms_ipums %>%
+  mutate(vmt_prd = ifelse(year >=2003, vmt_prd*1000, vmt_prd), vmt_fhwa = ifelse(year >=2003 & f_system == "ih", vmt_fhwa*1000, vmt_fhwa), hh_incr = ifelse(year == 1983, median_household_income*3.0593, ifelse(year == 1993, median_household_income*2.1087,ifelse(year == 2003, median_household_income*1.6560,ifelse(year == 2013, median_household_income*1.3080, median_household_income))))) #Need to review $ year to inflate historical value
+
+
+hpms_ipums2 <- hpms_ipums2 %>%
+  #filter(!is.na(vmt_fhwa)) %>%
+  #filter(vmt_prd > 0) %>%
+  rename(emp = s_emp,
+         poverty = s_poverty)
+
+
+hpms_ipums$year <- as.numeric(as.character(hpms_ipums$year))
+hpms_ipums2$year <- as.numeric(as.character(hpms_ipums2$year))
+hpms_ipums$county_fips <- as.factor(hpms_ipums$county_fips)
+hpms_ipums2$county_fips <- as.factor(hpms_ipums2$county_fips)
+
+hpms_ih <- hpms_ipums2 %>% filter(f_system == "ih") 
+hpms_mru <- hpms_ipums2 %>% filter(f_system == "mru")
+
+hpms_ih_fe <- pdata.frame(hpms_ih, index = c("county_fips", "year"))
+hpms_mru_fe <- pdata.frame(hpms_mru, index = c("county_fips", "year"))
+
+```
+
+
+##Section 3: General Model FHWA & PRD
+This section is the first model that looks at the entire dataset and replicates Table 2 of the Duranton article for all decades and by road type (IH or MRU). There are two models being developed. One for VMT data coming from Caltrans' California Public Road Data (PRD) and the other coming directly from the Federal Hiqhway Adminstration. 
+```{r, results = FALSE}
+
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "CalTrans PRD Data" = hpms_fe_ih_prd,
+  "FHWA HPMS Data" = hpms_fe_ih_fhwa
+)
+
+MRU_models <- list(
+  "CalTrans PRD Data" = hpms_fe_mru_prd,
+  "FHWA HPMS Data" = hpms_fe_mru_fhwa
+)
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+modelsummary(IH_models, 
+             stars = TRUE, 
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Table 1.")
+
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Table 1.")
+
+
+#step 1 : Estimate the FE model
+stargazer(hpms_fe_ih_prd, type = "text", title = "Fixed Effects Model Results")
+
+#step 2 : Estimate the RE model
+hpms_re_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "random")
+stargazer(hpms_re_ih_prd, type = "text", title = "Random Effects Model Results")
+
+#step 3 : Run Hausman test
+#phtest(hpms_fe_ih_prd, hpms_re_ih_prd)
+
+#We reject the null H0 that RE is appropriate, then we opt for fixed effects
+
+```
+
+----------------------------
+
+##Section 3: General Model FHWA & PRD
+This section is the first model that looks at the entire dataset and replicates Table 2 of the Duranton article for all decades and by road type (IH or MRU). There are two models being developed. One for VMT data coming from Caltrans' California Public Road Data (PRD) and the other coming directly from the Federal Hiqhway Adminstration. 
+##Table X: OLS Model by Decade (Caltrans PRD)
+```{r, results = FALSE}
+
+#2023
+hpms_fe_ih_prd2023  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+
+hpms_fe_mru_prd2023 <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                               hpms_mru_fe$vmt_prd > 0 & 
+                                               hpms_mru_fe$lane_miles_prd > 0, ])
+
+hpms_fe_ih_prd2013  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+
+hpms_fe_mru_prd2013 <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                               hpms_mru_fe$vmt_prd > 0 & 
+                                               hpms_mru_fe$lane_miles_prd > 0, ])
+
+hpms_fe_ih_prd2003  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+
+hpms_fe_mru_prd2003 <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                               hpms_mru_fe$vmt_prd > 0 & 
+                                               hpms_mru_fe$lane_miles_prd > 0, ])
+
+#1993 and 1983 data set is the same of FHWA given that there is no data from PRD prior to 2003
+#hpms_fe_ih_prd1993  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+#                           data = hpms_ih_fe[hpms_ih_fe$year == 1993 & 
+#                                              hpms_ih_fe$vmt_prd > 0 & 
+#                                              hpms_ih_fe$lane_miles_prd > 0, ])
+#
+#hpms_fe_mru_prd1993 <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+#                           data = hpms_mru_fe[hpms_mru_fe$year == 1993 & 
+#                                               hpms_mru_fe$vmt_prd > 0 & 
+#                                               hpms_mru_fe$lane_miles_prd > 0, ])
+#
+#hpms_fe_ih_prd1983  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+#                           data = hpms_ih_fe[hpms_ih_fe$year == 1983 & 
+#                                              hpms_ih_fe$vmt_prd > 0 & 
+#                                              hpms_ih_fe$lane_miles_prd > 0, ])
+#
+#hpms_fe_mru_prd1983 <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+#                           data = hpms_mru_fe[hpms_mru_fe$year == 1983 & 
+#                                               hpms_mru_fe$vmt_prd > 0 & 
+#                                               hpms_mru_fe$lane_miles_prd > 0, ])
+
+
+#Create the list for model comparison table
+IH_models <- list(
+#  "1983" = hpms_fe_ih_prd1983,
+#  "1993" = hpms_fe_ih_prd1993,
+  "2003" = hpms_fe_ih_prd2003,
+  "2013" = hpms_fe_ih_prd2013,
+  "2023" = hpms_fe_ih_prd2023
+)
+
+MRU_models <- list(
+#  "1983" = hpms_fe_mru_prd1983,
+#  "1993" = hpms_fe_mru_prd1993,
+  "2003" = hpms_fe_mru_prd2003,
+  "2013" = hpms_fe_mru_prd2013,
+  "2023" = hpms_fe_mru_prd2023
+)
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+modelsummary(
+  IH_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_prd\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Interstate Highway Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data Source: Caltrans PRD"
+)
+
+modelsummary(
+  MRU_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_prd\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Major Urban Road Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data Source: Caltrans PRD"
+)
+
+
+```
+
+
+
+
+##Table X: OLS Model by Decade (DOT FHWA)
+```{r, results = FALSE}
+#2023
+hpms_fe_ih_fhwa2023  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2023 <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                               hpms_mru_fe$vmt_fhwa > 0 & 
+                                               hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa2013  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2013 <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                               hpms_mru_fe$vmt_fhwa > 0 & 
+                                               hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa2003  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2003 <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                               hpms_mru_fe$vmt_fhwa > 0 & 
+                                               hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa1993  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1993 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa1993 <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1993 & 
+                                               hpms_mru_fe$vmt_fhwa > 0 & 
+                                               hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa1983  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1983 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa1983 <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1983 & 
+                                               hpms_mru_fe$vmt_fhwa > 0 & 
+                                               hpms_mru_fe$lane_miles_fhwa > 0, ])
+#Create the list for model comparison table
+IH_models <- list(
+  "1983" = hpms_fe_ih_fhwa1983,
+  "1993" = hpms_fe_ih_fhwa1993,
+  "2003" = hpms_fe_ih_fhwa2003,
+  "2013" = hpms_fe_ih_fhwa2013,
+  "2023" = hpms_fe_ih_fhwa2023
+)
+
+MRU_models <- list(
+  "1983" = hpms_fe_mru_fhwa1983,
+  "1993" = hpms_fe_mru_fhwa1993,
+  "2003" = hpms_fe_mru_fhwa2003,
+  "2013" = hpms_fe_mru_fhwa2013,
+  "2023" = hpms_fe_mru_fhwa2023
+)
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+modelsummary(
+  IH_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_fhwa\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Interstate Highway Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data Source: DOT FHWA"
+)
+
+modelsummary(
+  MRU_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_fhwa\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Major Urban Road Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data Source: DOT FHWA"
+)
+
+```
+
+##Table X: Joint Datasets
+```{r, results = FALSE}
+library(modelsummary)
+
+# --- helper to fit one regression ---
+fit_model <- function(df, source, decade) {
+  vmt_var <- paste0("vmt_", source)
+  lm_var  <- paste0("lane_miles_", source)
+  sub <- df[df$year == decade &
+              df[[vmt_var]] > 0 &
+              df[[lm_var]] > 0, ]
+  lm(as.formula(paste0("log(", vmt_var, ") ~ log(", lm_var, ")")), data = sub)
+}
+
+# decades where BOTH sources exist
+decades_both <- c(2003, 2013, 2023)
+# decades where only FHWA exists (pre-PRD coverage)
+decades_fhwa_only <- c(1983, 1993)
+
+sources <- c(prd = "PRD", fhwa = "FHWA")
+
+build_model_list <- function(df) {
+  models <- list()
+
+  # earliest decades: FHWA only
+  for (d in decades_fhwa_only) {
+    label <- paste0(d, " / FHWA")
+    models[[label]] <- fit_model(df, "fhwa", d)
+  }
+
+  # later decades: both sources, PRD then FHWA
+  for (d in decades_both) {
+    for (s in names(sources)) {
+      label <- paste0(d, " / ", sources[[s]])
+      models[[label]] <- fit_model(df, s, d)
+    }
+  }
+  models
+}
+
+IH_models  <- build_model_list(hpms_ih_fe)
+MRU_models <- build_model_list(hpms_mru_fe)
+
+# collapse both variable names into one row label
+coef_rename <- c(
+  "log(lane_miles_prd)"  = "ln(Lane Miles)",
+  "log(lane_miles_fhwa)" = "ln(Lane Miles)"
+)
+
+gof <- list(
+  list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+  list(raw = "r.squared", clean = "R2",       fmt = 3)
+)
+
+modelsummary(
+  IH_models,
+  coef_map = coef_rename,
+  stars = TRUE,
+  gof_map = gof,
+  title = "VMT as a Function of Lane Miles, Interstate Highway Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data sources: Caltrans PRD and DOT FHWA."
+)
+
+modelsummary(
+  MRU_models,
+  coef_map = coef_rename,
+  stars = TRUE,
+  gof_map = gof,
+  title = "VMT as a Function of Lane Miles, Major Urban Road Univariate OLS by Decade",
+  notes = "Note: Table 2 from Duranton. Data sources: Caltrans PRD and DOT FHWA."
+)
+
+```
+
+
+
+
+
+
+----------------------------
+##Section 4: General Model FHWA & PRD
+This 
+##Table X: OLS Model by Decade with Population Controls for IH
+```{r, results = FALSE}
+
+#PRD IH
+hpms_fe_ih_prd2023  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+hpms_fe_ih_prd2023_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+hpms_fe_ih_prd2013  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+hpms_fe_ih_prd2013_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+hpms_fe_ih_prd2003  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+hpms_fe_ih_prd2003_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_prd > 0 & 
+                                              hpms_ih_fe$lane_miles_prd > 0, ])
+
+#FHWA IH
+hpms_fe_ih_fhwa2023  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa2023_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2023 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+
+hpms_fe_ih_fhwa2013  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa2013_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2013 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_ih_fhwa2003  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa2003_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 2003 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_ih_fhwa1993  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1993 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+hpms_fe_ih_fhwa1993_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1993 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_ih_fhwa1983  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1983 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_ih_fhwa1983_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_ih_fe[hpms_ih_fe$year == 1983 & 
+                                              hpms_ih_fe$vmt_fhwa > 0 & 
+                                              hpms_ih_fe$lane_miles_fhwa > 0, ])
+
+
+#Create the list for model comparison table
+PRD_models <- list(
+#  "1983" = hpms_fe_ih_prd1983,
+#  "1983" = hpms_fe_ih_prd1983_pop,
+#  "1993" = hpms_fe_ih_prd1993,
+#  "1993" = hpms_fe_ih_prd1993_pop,
+  "2003" = hpms_fe_ih_prd2003,
+  "2003 (pop)" = hpms_fe_ih_prd2003_pop,
+  "2013" = hpms_fe_ih_prd2013,
+  "2013 (pop)" = hpms_fe_ih_prd2013_pop,
+  "2023" = hpms_fe_ih_prd2023,
+  "2023 (pop)" = hpms_fe_ih_prd2023_pop
+)
+
+FHWA_models <- list(
+  "1983" = hpms_fe_ih_fhwa1983,
+  "1983 (pop)" = hpms_fe_ih_fhwa1983_pop,
+  "1993" = hpms_fe_ih_fhwa1993,
+  "1993 (pop)" = hpms_fe_ih_fhwa1993_pop,
+  "2003" = hpms_fe_ih_fhwa2003,
+  "2003 (pop)" = hpms_fe_ih_fhwa2003_pop,
+  "2013" = hpms_fe_ih_fhwa2013,
+  "2013 (pop)" = hpms_fe_ih_fhwa2013_pop,
+  "2023" = hpms_fe_ih_fhwa2023,
+  "2023 (pop)" = hpms_fe_ih_fhwa2023_pop
+)
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+modelsummary(
+  PRD_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_prd\\)|log\\(population\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Interstate Highway Univariate OLS by Decade",
+  notes = "Note: Table 3 from Duranton. Data Source: Caltrans PRD"
+)
+
+modelsummary(
+  FHWA_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_fhwa\\)|log\\(population\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Interstate Highway Univariate OLS by Decade",
+  notes = "Note: Table 3 from Duranton. Data Source: DOT FHWA"
+)
+
+```
+
+
+##Table X: OLS Model by Decade with Population Controls for MRU
+```{r, results = FALSE}
+#PRD MRU
+hpms_fe_mru_prd2023  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+hpms_fe_mru_prd2023_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+hpms_fe_mru_prd2013  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+hpms_fe_mru_prd2013_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+hpms_fe_mru_prd2003  <- lm(log(vmt_prd) ~ log(lane_miles_prd), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+hpms_fe_mru_prd2003_pop  <- lm(log(vmt_prd) ~ log(lane_miles_prd) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                              hpms_mru_fe$vmt_prd > 0 & 
+                                              hpms_mru_fe$lane_miles_prd > 0, ])
+
+
+#FHWA MRU
+hpms_fe_mru_fhwa2023  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2023_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2023 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+
+hpms_fe_mru_fhwa2013  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2013_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2013 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_mru_fhwa2003  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa2003_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 2003 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_mru_fhwa1993  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1993 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+hpms_fe_mru_fhwa1993_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1993 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_mru_fhwa1983  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1983 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+hpms_fe_mru_fhwa1983_pop  <- lm(log(vmt_fhwa) ~ log(lane_miles_fhwa) + log(population), 
+                           data = hpms_mru_fe[hpms_mru_fe$year == 1983 & 
+                                              hpms_mru_fe$vmt_fhwa > 0 & 
+                                              hpms_mru_fe$lane_miles_fhwa > 0, ])
+
+
+#Create the list for model comparison table
+PRD_models <- list(
+#  "1983" = hpms_fe_mru_prd1983,
+#  "1983" = hpms_fe_mru_prd1983_pop,
+#  "1993" = hpms_fe_mru_prd1993,
+#  "1993" = hpms_fe_mru_prd1993_pop,
+  "2003" = hpms_fe_mru_prd2003,
+  "2003" = hpms_fe_mru_prd2003_pop,
+  "2013" = hpms_fe_mru_prd2013,
+  "2013" = hpms_fe_mru_prd2013_pop,
+  "2023" = hpms_fe_mru_prd2023,
+  "2023" = hpms_fe_mru_prd2023_pop
+)
+
+FHWA_models <- list(
+  "1983" = hpms_fe_mru_fhwa1983,
+  "1983 (pop)" = hpms_fe_mru_fhwa1983_pop,
+  "1993" = hpms_fe_mru_fhwa1993,
+  "1993 (pop)" = hpms_fe_mru_fhwa1993_pop,
+  "2003" = hpms_fe_mru_fhwa2003,
+  "2003 (pop)" = hpms_fe_mru_fhwa2003_pop,
+  "2013" = hpms_fe_mru_fhwa2013,
+  "2013 (pop)" = hpms_fe_mru_fhwa2013_pop,
+  "2023" = hpms_fe_mru_fhwa2023,
+  "2023 (pop)" = hpms_fe_mru_fhwa2023_pop
+)
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+modelsummary(
+  PRD_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_prd\\)|log\\(population\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Major Urban Road Univariate OLS by Decade",
+  notes = "Note: Table 3 from Duranton. Data Source: Caltrans PRD"
+)
+
+modelsummary(
+  FHWA_models,
+  stars = TRUE,
+  coef_omit = "^(?!(log\\(lane_miles_fhwa\\)|log\\(population\\)))",
+  gof_map = list(
+    list(raw = "nobs",      clean = "Num.Obs.", fmt = 0),
+    list(raw = "r.squared", clean = "R2",       fmt = 3)
+  ),
+  title = "VMT as a Function of Lane Miles, Major Urban Road Univariate OLS by Decade",
+  notes = "Note: Table 3 from Duranton. Data Source: DOT FHWA"
+)
+```
+
+
+-----------------------------
+##Section 5: Fixed Effects Models
+#Model Fixed Effects (PRD including historical FHWA data)
+```{r, results = FALSE}
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp + drivers_licence + total_veh, data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp + drivers_licence + total_veh, data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp+ drivers_licence + total_veh, data = hpms_ih_fe[hpms_ih_fe$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp + drivers_licence + total_veh, data = hpms_mru_fe[hpms_mru_fe$vmt_prd>0,], model = "within", effect = "twoways")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = coeftest(hpms_fe_ih_prd),
+  "(2)" = coeftest(hpms_fe_ih_prd_pop),
+  "(3)" = coeftest(hpms_fe_ih_prd_sc),
+  "(4)" = coeftest(hpms_fe_ih_prd_county),
+  "(5)" = coeftest(hpms_fe_ih_prd_pop_county),
+  "(6)" = coeftest(hpms_fe_ih_prd_sc_county)
+)
+
+MRU_models <- list(
+  "(1)" = coeftest(hpms_fe_mru_prd),
+  "(2)" = coeftest(hpms_fe_mru_prd_pop),
+  "(3)" = coeftest(hpms_fe_mru_prd_sc),
+  "(4)" = coeftest(hpms_fe_mru_prd_county),
+  "(5)" = coeftest(hpms_fe_mru_prd_pop_county),
+  "(6)" = coeftest(hpms_fe_mru_prd_sc_county)
+)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+```
+
+
+##Model Fixed Effects (PRD no 83-93 data)
+```{r, results = FALSE}
+hpms_ih_fe_prd <- hpms_ih_fe
+hpms_mru_fe_prd<- hpms_mru_fe
+
+
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = hpms_fe_ih_prd,
+  "(2)" = hpms_fe_ih_prd_pop,
+  "(3)" = hpms_fe_ih_prd_sc,
+  "(4)" = hpms_fe_ih_prd_county,
+  "(5)" = hpms_fe_ih_prd_pop_county,
+  "(6)" = hpms_fe_ih_prd_sc_county)
+
+MRU_models <- list(
+  "(1)" = hpms_fe_mru_prd,
+  "(2)" = hpms_fe_mru_prd_pop,
+  "(3)" = hpms_fe_mru_prd_sc,
+  "(4)" = hpms_fe_mru_prd_county,
+  "(5)" = hpms_fe_mru_prd_pop_county,
+  "(6)" = hpms_fe_mru_prd_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+
+```
+
+
+##Model Fixed Effects (PRD no 83-93 data + UA population)
+```{r, results = FALSE}
+
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_pop <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+hpms_fe_mru_prd_sc <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "time")
+
+hpms_fe_ih_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_county <- plm(log(vmt_prd) ~ log(lane_miles_prd), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop), data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_pop_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop), data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe_prd[hpms_ih_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+hpms_fe_mru_prd_sc_county <- plm(log(vmt_prd) ~ log(lane_miles_prd)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe_prd[hpms_mru_fe_prd$vmt_prd>0,], model = "within", effect = "twoways")
+
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = coeftest(hpms_fe_ih_prd),
+  "(2)" = coeftest(hpms_fe_ih_prd_pop),
+  "(3)" = coeftest(hpms_fe_ih_prd_sc),
+  "(4)" = coeftest(hpms_fe_ih_prd_county),
+  "(5)" = coeftest(hpms_fe_ih_prd_pop_county),
+  "(6)" = coeftest(hpms_fe_ih_prd_sc_county)
+)
+
+MRU_models <- list(
+  "(1)" = coeftest(hpms_fe_mru_prd),
+  "(2)" = coeftest(hpms_fe_mru_prd_pop),
+  "(3)" = coeftest(hpms_fe_mru_prd_sc),
+  "(4)" = coeftest(hpms_fe_mru_prd_county),
+  "(5)" = coeftest(hpms_fe_mru_prd_pop_county),
+  "(6)" = coeftest(hpms_fe_mru_prd_sc_county)
+)
+
+summary(hpms_fe_ih_prd_pop_county)
+summary(hpms_fe_ih_prd_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(ua_pop)"     = "log(Urban Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_prd)" = "log(Lane Miles)",
+                          "log(ua_pop)"     = "log(Urban Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: Caltrans PRD")
+
+```
+
+
+
+##Model Fixed Effects (FHWA)
+```{r, results = FALSE}
+
+hpms_ih_fhwa <- hpms_ipums2 %>% filter(f_system == "ih") %>% filter(vmt_fhwa>0)
+hpms_mru_fhwa <- hpms_ipums2 %>% filter(f_system == "mru") %>% filter(vmt_fhwa>0)
+
+
+hpms_ih_fe <- pdata.frame(hpms_ih_fhwa, index = c("county_fips", "year"))
+hpms_mru_fe <- pdata.frame(hpms_mru_fhwa, index = c("county_fips", "year"))
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(population)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = hpms_fe_ih_fhwa,
+  "(2)" = hpms_fe_ih_fhwa_pop,
+  "(3)" = hpms_fe_ih_fhwa_sc,
+  "(4)" = hpms_fe_ih_fhwa_county,
+  "(5)" = hpms_fe_ih_fhwa_pop_county,
+  "(6)" = hpms_fe_ih_fhwa_sc_county)
+
+MRU_models <- list(
+  "(1)" = hpms_fe_mru_fhwa,
+  "(2)" = hpms_fe_mru_fhwa_pop,
+  "(3)" = hpms_fe_mru_fhwa_sc,
+  "(4)" = hpms_fe_mru_fhwa_county,
+  "(5)" = hpms_fe_mru_fhwa_pop_county,
+  "(6)" = hpms_fe_mru_fhwa_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: DOT FHWA")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(population)"     = "log(Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational employment. Data source: DOT FHWA")
+
+```
+
+
+##Model Fixed Effects (FHWA) Urban Population
+```{r, results = FALSE}
+
+
+hpms_ih <- hpms_ipums2 %>% filter(f_system == "ih") %>% filter(vmt_fhwa>0)
+hpms_mru <- hpms_ipums2 %>% filter(f_system == "mru") %>% filter(vmt_fhwa>0)
+
+
+hpms_ih_fe <- pdata.frame(hpms_ih, index = c("county_fips", "year"))
+hpms_mru_fe <- pdata.frame(hpms_mru, index = c("county_fips", "year"))
+
+#step 1 : Estimate the FE model
+hpms_fe_ih_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_pop <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "time")
+hpms_fe_mru_fhwa_sc <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "time")
+
+hpms_fe_ih_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop), data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_pop_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop), data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+hpms_fe_ih_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp, data = hpms_ih_fe[hpms_ih_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+hpms_fe_mru_fhwa_sc_county <- plm(log(vmt_fhwa) ~ log(lane_miles_fhwa)+ log(ua_pop)+ log(hh_incr) + poverty + educ + emp , data = hpms_mru_fe[hpms_mru_fe$vmt_fhwa>0,], model = "within", effect = "twoways")
+
+
+
+#Create the list for model comparison table
+IH_models <- list(
+  "(1)" = hpms_fe_ih_fhwa,
+  "(2)" = hpms_fe_ih_fhwa_pop,
+  "(3)" = hpms_fe_ih_fhwa_sc,
+  "(4)" = hpms_fe_ih_fhwa_county,
+  "(5)" = hpms_fe_ih_fhwa_pop_county,
+  "(6)" = hpms_fe_ih_fhwa_sc_county)
+
+MRU_models <- list(
+  "(1)" = hpms_fe_mru_fhwa,
+  "(2)" = hpms_fe_mru_fhwa_pop,
+  "(3)" = hpms_fe_mru_fhwa_sc,
+  "(4)" = hpms_fe_mru_fhwa_county,
+  "(5)" = hpms_fe_mru_fhwa_pop_county,
+  "(6)" = hpms_fe_mru_fhwa_sc_county)
+
+
+# 4. Generate the Table with Driscoll-Kraay Robust SEs
+rows <- tribble(
+  ~term,                            ~`(1)`, ~`(2)`, ~`(3)`, ~`(4)`, ~`(5)`, ~`(6)`,
+  "Time Fixed Effects",             "Y",    "Y",    "Y",    "Y",    "Y",    "Y",
+  "County Fixed Effects",           "",     "",     "",     "Y",    "Y",    "Y",
+  "Socioeconomic Characteristics",  "",     "",     "Y",    "",     "",     "Y"
+)
+
+modelsummary(IH_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(ua_pop)"     = "log(Urban Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF INTERSTATE HIGHWAY LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational attainment. Data source: DOT FHWA")
+
+modelsummary(MRU_models, 
+             stars = TRUE, 
+             coef_map = c("log(lane_miles_fhwa)" = "log(Lane Miles)",
+                          "log(ua_pop)"     = "log(Urban Population)"),
+             add_rows = rows,
+             gof_omit = 'AIC|BIC|Log|RMSE',
+             title = "VMT AS A FUNCTION OF MAJOR ROAD URBAN LANE MILES",
+             notes = "Note: Control variables for socioeconomic characteristics include: income, employment rate, poverty rate, and educational attainment. Data source: DOT FHWA")
+
+```
+
+
+
+

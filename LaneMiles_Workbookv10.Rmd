@@ -1,0 +1,1200 @@
+---
+title: "LaneMiles_Workbook"
+output: html_document
+date: "2026-06-05"
+---
+
+##Section 1: Loading Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(foreign)
+library(ggplot2)
+library(ipumsr)
+library(lfe)
+library(lmtest)
+library(lubridate)
+library(magick)
+library(modelsummary)
+library(pdftools)
+library(plm)
+library(psych)
+library(readxl)
+library(scales)
+library(sf)
+library(stargazer)
+library(stringr)
+library(tesseract)
+library(tidycensus)
+library(tidyr)
+library(tidyverse)
+library(tinytex)
+library(tmap)
+library(units)
+
+options(scipen = 999)
+
+```
+
+
+##Section 2: Create IPUMS Database
+The following batch of code loads up PUMS data for California counties. It pull socioeconomic variables for counties in California which will be used in future regressions. The final output is PUMS data at the County level for 1980, 1990, 2000, 2010, and 2020.
+```{r, results = FALSE, warning=FALSE}
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+############## IPUMS USA Socioeconomic Data
+
+# Step 1: Read the DDI (metadata)
+ddi <- read_ipums_ddi("1_Source Data/IPUMS/usa_00001.xml")
+
+# Step 2: Read the microdata using the DDI
+data <- read_ipums_micro(ddi)
+
+ca_ipums <- data %>%
+  filter(STATEFIP == 6) 
+
+ #Code in manufacturing
+ ca_ipums <- ca_ipums %>%
+   mutate(manuf = case_when(
+     # 1950-basis codes (1980, 1990, 2000 Census)
+     YEAR %in% c(1980, 1990, 2000) & IND >= 100 & IND <= 392 ~ 1,
+     # 2000-basis codes (2000+ ACS)
+     YEAR >= 2000 & IND >= 1070 & IND <= 3990 ~ 1, #Changed industry code
+     TRUE ~ 0
+   )) 
+ 
+ca_ipums <- ca_ipums %>%
+  mutate(emp = ifelse(EMPSTAT ==1,1,0), educ = ifelse(as.numeric(EDUCD)>=70,1,0),
+         auto = ifelse(YEAR == 1980, AUTOS, VEHICLES)) %>%
+  group_by(COUNTYFIP, YEAR) %>%
+  mutate(poverty_d = case_when(POVERTY > 0 & POVERTY < 100 ~ 1,POVERTY == 0 ~ NA_real_, POVERTY >= 100 ~ 0), poverty_s = mean(poverty_d, na.rm = TRUE))
+
+
+ca_ipums_ct <- ca_ipums %>%
+  group_by(COUNTYFIP, YEAR) %>%
+  filter(HHINCOME<999999, !is.na(HHINCOME)) %>%
+  summarize(avg_hh_income = weighted.mean(HHINCOME, HHWT),
+            s_emp = weighted.mean(emp, PERWT), s_poverty = weighted.mean(poverty_d, PERWT),
+            educ = weighted.mean(educ, PERWT), auto = weighted.mean(auto, HHWT), auto_n = sum(auto*HHWT), s_manuf = weighted.mean(manuf, PERWT))
+
+
+#Output California County level IPUMS data for 1980, 1990, 2000, 2010, and 2020.
+path_out <- "2_Data Cleaning//Code_Output"
+write.csv(ca_ipums_ct, file.path(path_out, "ca_ipums_ct.csv"), row.names=FALSE)
+
+#Clean directory
+rm(list = ls())
+
+```
+
+
+##Section 3: Create HPMS FHWA Database (lane miles, vmt, miles at the County level 1983-2023)
+The following lines load up, clean, and arrange Highway Performance Monitoring System (HPMS) data from the Federal Highway Authority. It does so for 1983, 1993, 2003, 2013, and 2023. The data is filtered by the type of road since we only care about Interstate Highways (IH) and Major Urban Roads (MRU), which are classified as Principal Arterial, Principal Arterial – Other, Minor Arterial, and Major Collector. The final output from this is VMT, miles, and lane miles data by road type (IH and MRU) for each year of analysis at the County level.
+
+Add notes on why the approach to estimating using lane miles was used, currently there are two methods being used.
+```{r, results = FALSE, warning=FALSE}
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+############ HPMS CA Raw Data
+
+hpms_23_11 <- st_read("1_Source Data/HPMS data/HPMS2023.gdb/a00000011.gdbtable")
+
+hpms_23_ca <- st_read("1_Source Data/HPMS data/HPMS_FULL_CA_2023.shp")
+
+hpms_13_ca <- st_read("1_Source Data/HPMS data/california2013.shp")
+
+hpms_03 <- read.csv("1_Source Data/HPMS data/Historic_HPMS_Data__Universe__-_2003_20250319.csv")
+
+hpms_93 <- read.csv("1_Source Data/HPMS data/Historic_HPMS_Data__Universe_1993.csv")
+
+hpms_83 <- read.csv("1_Source Data/HPMS data/Historic_HPMS_Data__Universe_1983.csv")
+
+
+####### HPMS Raw Datasets Construction
+
+## 2023 ####
+
+#names(hpms_23_11)
+
+hpms_ca23 <- hpms_23_11 %>%
+ mutate(COUNTY_ID = as.numeric(COUNTY_ID)) %>%
+  filter(!URBAN_ID == "99999") %>%
+  filter(!URBAN_ID == "NULL")
+
+hpms_ca23 <- st_transform(hpms_ca23, 32611)
+
+hpms_ca23$length_m <- st_length(hpms_ca23)
+
+hpms_ca23$length_miles <- set_units(hpms_ca23$length_m, "mi")
+
+hpms_ca23 <- hpms_ca23 %>%
+  mutate(miles = EndPoint - BeginPoint) %>%
+  mutate(THROUGH_LANES = as.numeric(THROUGH_LANES)) %>%
+  mutate(lane_miles = length_miles * THROUGH_LANES) %>%
+  mutate(lane_miles2 = miles *THROUGH_LANES)
+
+
+hpms_ca23 <- hpms_ca23 %>%
+ select(RouteID, COUNTY_ID, URBAN_ID, AADT, miles, length_miles, lane_miles, lane_miles2, F_SYSTEM, Shape_Length, THROUGH_LANES)
+
+hpms_ca23 <- hpms_ca23 %>% select(-Shape) %>%
+ filter(!F_SYSTEM == "NULL")
+
+hpms_ca23 <- as.data.frame(hpms_ca23) %>% select(-Shape)
+
+hpms_23_ca_ct <- hpms_ca23 %>%
+ filter(!is.na(COUNTY_ID)) %>%
+  mutate(year = 2023, county = COUNTY_ID, vmt = as.numeric(AADT)*miles, lane_miles = lane_miles2, f_system = F_SYSTEM) %>%
+  group_by(county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(miles), lane_miles = sum(lane_miles))
+
+## 2023 ALTERNATIVE ####
+
+#hpms_ca23 <- hpms_23_ca %>%
+ # mutate(county_id = as.numeric(county_id)) %>%
+  #filter(!is.na(urban_id)) %>%
+  #filter(urban_id != 99999)
+
+#hpms_ca23 <- st_transform(hpms_ca23, 32611)
+#hpms_ca23$length_m <- st_length(hpms_ca23)
+#hpms_ca23$length_miles <- set_units(hpms_ca23$length_m, "mi")
+
+#hpms_ca23 <- hpms_ca23 %>%
+#  mutate(miles = endpoint - beginpoint) %>%
+#  mutate(through_la = as.numeric(through_la)) %>%
+#  mutate(lane_miles = length_miles * through_la) %>%
+#  mutate(lane_miles2 = miles * through_la)
+
+#hpms_ca23 <- hpms_ca23 %>%
+#  select(routeid, county_id, urban_id, aadt, miles, length_miles,
+#         lane_miles, lane_miles2, f_system, SHAPE__Len, through_la)
+
+#hpms_ca23 <- hpms_ca23 %>%
+#  st_drop_geometry() %>%
+#  filter(!is.na(f_system))
+
+#hpms_ca23 <- as.data.frame(hpms_ca23)
+
+#hpms_23_ca_ct <- hpms_ca23 %>%
+#  filter(!is.na(county_id)) %>%
+#  mutate(year = 2023,
+#         county = county_id,
+#         vmt = as.numeric(aadt) * miles,
+#         lane_miles = lane_miles2,
+#         f_system = f_system) %>%
+#  group_by(county, f_system, year) %>%
+#  summarise(vmt = sum(vmt), miles = sum(miles), lane_miles = sum(lane_miles))
+
+
+
+
+
+## 2013 ####
+
+hpms_ca13 <- hpms_13_ca %>%
+  mutate(COUNTY_ID = county_cod) %>%
+  mutate(URBAN_ID = urban_code) %>%
+  filter(!URBAN_ID == 99999) %>%
+  filter(!is.na(URBAN_ID)) %>%
+  filter(!is.na(aadt_vn)) %>%
+  filter(!is.na(through_la))
+
+
+hpms_ca13 <- st_transform(hpms_ca13, 32611)
+
+hpms_ca13$length_m <- st_length(hpms_ca13)
+
+hpms_ca13$length_miles <- set_units(hpms_ca13$length_m, "mi")
+
+hpms_ca13 <- hpms_ca13 %>%
+  mutate(miles = end_point - begin_poin) %>%
+  mutate(THROUGH_LANES = as.numeric(through_la)) %>%
+  mutate(lane_miles = miles * THROUGH_LANES) %>%
+  mutate(vmt = aadt_vn*miles)
+
+
+hpms_ca13 <- hpms_ca13 %>%
+  mutate(RouteID = id, AADT = aadt_vn, f_system = f_system_v) %>%
+  select(RouteID, county_cod, URBAN_ID,AADT, miles, length_miles, lane_miles, f_system, vmt)
+
+hpms_13_ca_ct <- hpms_ca13 %>%
+  filter(!f_system == "NULL") %>%
+  mutate(year = 2013, county = county_cod) %>%
+  group_by(county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(miles), lane_miles = sum(lane_miles))
+
+hpms_13_ca_ct <- as.data.frame(hpms_13_ca_ct) %>% select(-geometry)
+
+
+
+## 2003 ####
+
+hpms_03_ca <- hpms_03 %>%
+  filter(State_Code ==6) %>%
+  mutate(county = County_Code, f_system = F_System,
+         lane_miles = Through_Lanes*Section__Length,
+         miles = Section__Length,
+         vmt = AADT*Section__Length,
+         year = 2003) %>%       
+  filter(Rural.Urban != 1)
+
+
+hpms_03_ca_ct <- hpms_03_ca %>%
+  group_by(county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(miles),lane_miles = sum(lane_miles))
+
+
+##1993 ####
+
+hpms_93_ca <- hpms_93 %>%
+  filter(STATE == 6) %>%
+  mutate(county = COUNTY, f_system = FUNCTIONAL.SYSTEM,
+         vmt = SECTION.LENGTH*AADT, lane_miles = NUMBER.OF.LANES*SECTION.LENGTH,
+         year = 1993) %>%
+  filter(RURAL.URBAN != 1)
+
+hpms_93_ca_ct <- hpms_93_ca %>%
+  group_by(county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(SECTION.LENGTH), lane_miles = sum(lane_miles))
+
+##1983 ####
+
+
+hpms_83_ca <- hpms_83 %>%
+  filter(State.FIPS.Code == 6) %>%
+  mutate(county = County.FIPS.Code, f_system = Functional.Class,
+         vmt = Section.Grouped.Length*AADT, lane_miles = Number.of.Through.Lanes*Section.Grouped.Length,
+         year = 1983) %>%
+  filter(Rural.Urban != 1)
+
+hpms_83_ca_ct <- hpms_83_ca %>%
+  group_by(county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(Section.Grouped.Length), lane_miles = sum(lane_miles))
+
+
+## 1983-2003
+
+hpms_ca_8303 <- hpms_03_ca_ct %>% rbind(hpms_93_ca_ct, hpms_83_ca_ct)
+
+hpms_ca_8303$county <- as.factor(hpms_ca_8303$county)
+
+hpms_ca_8303 <- hpms_ca_8303 %>%
+  mutate(f_system = ifelse(f_system>10, f_system-10, f_system)) %>%
+  mutate(mru_d = ifelse(f_system >=2 & f_system<9, 1,0))
+
+
+
+hpms_ca_ih8303 <- hpms_ca_8303 %>%
+  filter(f_system == 1) %>%
+  select(-mru_d) %>%
+  mutate(f_system = "ih")
+
+
+hpms_ca_mru8303 <- hpms_ca_8303 %>%
+  filter(mru_d == 1) %>%
+  group_by(county, year) %>%
+  summarise(vmt= sum(vmt), miles = sum(miles), lane_miles = sum(lane_miles)) %>%
+  ungroup() %>%
+  group_by(county) %>%
+  mutate(f_system = "mru")
+
+
+## 1983-2023
+
+hpms_23_ca_ct$f_system <- as.numeric(hpms_23_ca_ct$f_system)
+
+hpms_ca_8323 <- hpms_23_ca_ct %>% rbind(hpms_13_ca_ct, hpms_03_ca_ct, hpms_93_ca_ct, hpms_83_ca_ct)
+
+
+hpms_ca_8323 <- hpms_ca_8323 %>%
+  mutate(f_system = ifelse(f_system>10, f_system-10, f_system))
+
+
+hpms_ca_8323 <- hpms_ca_8323 %>%
+  mutate(mru_d = ifelse((year == 2023 | year == 2013) & (f_system >=2 & f_system<7), 1,
+                        ifelse((year <2013) & (f_system >=2 & f_system<9), 1,0)))
+
+
+hpms_ca_ih <- hpms_ca_8323 %>%
+  ungroup() %>%
+  filter(f_system == 1) %>%
+  select(-f_system, -mru_d) %>%
+  mutate(type = "ih")
+
+
+hpms_ca_mru <- hpms_ca_8323 %>%
+  filter(mru_d == 1) %>%
+  group_by(county, year) %>%
+  summarise(vmt= sum(vmt), miles = sum(miles), lane_miles = sum(lane_miles)) %>%
+  mutate(type = "mru")
+
+
+hpms_ca_ih$county <- as.factor(hpms_ca_ih$county)
+hpms_ca_mru$county <- as.factor(hpms_ca_mru$county)
+
+hpms_ca_8323_ct <- rbind(hpms_ca_ih, hpms_ca_mru)
+
+hpms_ca_8323_ct$county_fips <- hpms_ca_8323_ct$county
+
+hpms_ca_8323_ct$county_fips <- as.numeric(as.character(hpms_ca_8323_ct$county_fips)) + 6000
+
+
+hpms_ca_8323_ct <- hpms_ca_8323_ct %>%
+  mutate(ct_yr = paste0(county_fips, "-", year))
+
+
+path_out <- "2_Data Cleaning//Code_Output"
+
+write.csv(hpms_ca_8323_ct, file.path(path_out, "hpms_ca_8323_ct.csv"), row.names=FALSE)
+
+#Clean directory
+  rm(list = ls())
+
+```
+
+
+##Section 4: Crosswalk US Urban Areas to US counties using MCDC Population Weights
+There are two primary sources of HPMS data used in this study: the nationally standardized HPMS dataset published by the Federal Highway Administration (FHWA) and the California Public Road Data (PRD) produced by Caltrans. Although both originate from California’s roadway reporting, the two datasets differ because each agency applies its own processing rules, segmentation conventions, and functional classifications. FHWA converts California’s submissions into a uniform national format, which involves reshaping segments, applying federal expansion factors, and enforcing consistency checks. Caltrans PRD, in contrast, reflects California’s internal roadway inventory system and preserves more detailed engineering information. As a result, measures such as lane miles, miles, and VMT often differ between FHWA and PRD, especially in recent years when FHWA releases preliminary or partially processed California data.
+
+A second challenge is that Caltrans PRD reports roadway measures at the Urban Area level rather than the County level. Urban Areas frequently expand or contract over time, and their boundaries do not remain constant throughout decades. This makes it inappropriate to treat Urban Areas as units for a panel data set. To fix this, Urban Areas are allocated to counties using geographic correspondence files from the Missouri Census Data Center (Geocorr). Geocorr provides crosswalks linking Urban Areas to counties based on population weights, allowing each Urban Area’s roadway measures to be proportionally assigned to counties according to the share of the Urban Area’s population residing in each county in that year. The final output is VMT and miles data by road type (IH and MRU) for each year of analysis at the County level.
+```{r, results = FALSE, warning=FALSE}
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+ua_miles_dvmt <- read.csv("1_Source Data/HPMS data/ua_miles_dvmt.csv")
+
+ua_county_2020_pop_w <- read.csv("1_Source Data/MCDC/GeoCorr_2020_UA_County_PopW.csv")
+ua_county_2010_pop_w <- read.csv("1_Source Data/MCDC/GeoCorr_2010_UA_County_PopW.csv")
+ua_county_2000_pop_w <- read.csv("1_Source Data/MCDC/GeoCorr_2000_UA_County_PopW.csv")
+ua_county_2020_land_w <- read.csv("1_Source Data/MCDC/GeoCorr_2020_UA_County_LandW.csv")
+ua_county_2010_land_w <- read.csv("1_Source Data/MCDC/GeoCorr_2010_UA_County_LandW.csv")
+ua_county_2000_land_w <- read.csv("1_Source Data/MCDC/GeoCorr_2000_UA_County_LandW.csv")
+
+
+ua_miles_dvmt_23 <- ua_miles_dvmt %>%
+  filter(year == "2023")
+ua_miles_dvmt_13 <- ua_miles_dvmt %>%
+  filter(year == "2013")
+ua_miles_dvmt_03 <- ua_miles_dvmt %>%
+  filter(year == "2003")
+
+#2020 Population and Land Weights, VMT and Lane Miles will be distributed by Land and Population by Population
+ua_county_2020_pop_w <- ua_county_2020_pop_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = CountyName,
+    ua_name    = uaname,
+    pop = pop20
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+ua_county_2020_pop_w  <- ua_county_2020_pop_w  %>%
+  mutate(ua_name = str_remove(ua_name, ", CA$"))
+
+ua_county_2020_pop_w <- ua_county_2020_pop_w %>%
+  mutate(
+    ua_name = recode(
+      ua_name,
+      "Arroyo Grande--Grover Beach--Pismo Beach" = "Arroyo Grande--Grover Beach",
+      "Concord--Walnut Creek" = "Concord",
+      "Calexico" = "El Centro--Calexico",
+      "El Paso de Robles (Paso Robles)--Atascadero" = "El Paso de Robles--Atascadero",
+      "Indio--Palm Desert--Palm Springs" = "Indio--Cathedral City",
+      "Livermore--Pleasanton--Dublin" = "Livermore",
+      "Mission Viejo--Lake Forest--Laguna Niguel" = "Mission Viejo--Lake Forest--San Clemente",
+      "Oxnard--San Buenaventura (Ventura)" = "Oxnard",
+      "Palmdale--Lancaster" = "Lancaster--Palmdale",
+      "Seaside--Monterey--Pacific Grove" = "Seaside--Monterey",
+      "Temecula--Murrieta--Menifee" = "Murrieta--Temecula--Menifee",
+      "Tracy--Mountain House" = "Tracy",
+      "Victorville--Hesperia--Apple Valley" = "Victorville--Hesperia",
+      "Yuma, AZ--CA" = "Yuma, AZ-CA"
+    )
+  )
+
+
+ua_county_2020_land_w <- ua_county_2020_land_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = CountyName,
+    ua_name    = uaname
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+ua_county_2020_land_w  <- ua_county_2020_land_w  %>%
+  mutate(ua_name = str_remove(ua_name, ", CA$"))
+
+
+ua_county_2020_land_w <- ua_county_2020_land_w %>%
+  mutate(
+    ua_name = recode(
+      ua_name,
+      "Arroyo Grande--Grover Beach--Pismo Beach" = "Arroyo Grande--Grover Beach",
+      "Concord--Walnut Creek" = "Concord",
+      "Calexico" = "El Centro--Calexico",
+      "El Paso de Robles (Paso Robles)--Atascadero" = "El Paso de Robles--Atascadero",
+      "Indio--Palm Desert--Palm Springs" = "Indio--Cathedral City",
+      "Livermore--Pleasanton--Dublin" = "Livermore",
+      "Mission Viejo--Lake Forest--Laguna Niguel" = "Mission Viejo--Lake Forest--San Clemente",
+      "Oxnard--San Buenaventura (Ventura)" = "Oxnard",
+      "Palmdale--Lancaster" = "Lancaster--Palmdale",
+      "Seaside--Monterey--Pacific Grove" = "Seaside--Monterey",
+      "Temecula--Murrieta--Menifee" = "Murrieta--Temecula--Menifee",
+      "Tracy--Mountain House" = "Tracy",
+      "Victorville--Hesperia--Apple Valley" = "Victorville--Hesperia",
+      "Yuma, AZ--CA" = "Yuma, AZ-CA"
+    )
+  )
+
+
+
+#2010
+ua_county_2010_pop_w <- ua_county_2010_pop_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = cntyname,
+    ua_name    = uaname,
+    pop = pop10
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+ua_county_2010_pop_w  <- ua_county_2010_pop_w  %>%
+  mutate(ua_name = str_remove(ua_name, ", CA Urban Cluster"))%>%
+  mutate(ua_name = str_remove(ua_name, ", CA Urbanized Area"))
+
+
+ua_county_2010_pop_w <- ua_county_2010_pop_w %>%
+  mutate(
+    ua_name = recode(
+      ua_name,
+      
+      "El Centro--Calexico" = "El Centro",
+      "El Paso de Robles (Paso Robles)--Atascadero" = "El Paso de Robles (Paso Robles)-Atascadero",
+      "Gilroy--Morgan Hill" = "Gilroy--Morgan Hill",
+      "Indio--Cathedral City" = "Indio-Cathedral City-Palm Springs",
+      "Lancaster--Palmdale" = "Lancaster--Palmdale",
+      "Los Angeles--Long Beach--Anaheim" = "LA-Long Beach-Santa Ana",
+      "Mission Viejo--Lake Forest--San Clemente" = "Mission Viejo",
+      "Murrieta--Temecula--Menifee" = "Murrieta-Temecula-Menifee",
+      "Riverside--San Bernardino" = "Riverside-San Bernardino",
+      "San Francisco--Oakland" = "San Francisco-Oakland",
+      "Seaside--Monterey" = "Seaside-Monterey-Marina",
+      "Victorville--Hesperia" = "Victorville-Hesperia-Apple Valley",
+      "Yuma, AZ--CA Urbanized Area" = "Yuma, AZ-CA"
+    )
+  )
+
+
+ua_county_2010_land_w <- ua_county_2010_land_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = cntyname,
+    ua_name    = uaname
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+ua_county_2010_land_w  <- ua_county_2010_land_w  %>%
+  mutate(ua_name = str_remove(ua_name, ", CA Urban Cluster"))%>%
+  mutate(ua_name = str_remove(ua_name, ", CA Urbanized Area"))
+
+
+ua_county_2010_land_w <- ua_county_2010_land_w %>%
+  mutate(
+    ua_name = recode(
+      ua_name,
+      
+      "El Centro--Calexico" = "El Centro",
+      "El Paso de Robles (Paso Robles)--Atascadero" = "El Paso de Robles (Paso Robles)-Atascadero",
+      "Gilroy--Morgan Hill" = "Gilroy--Morgan Hill",
+      "Indio--Cathedral City" = "Indio-Cathedral City-Palm Springs",
+      "Lancaster--Palmdale" = "Lancaster--Palmdale",
+      "Los Angeles--Long Beach--Anaheim" = "LA-Long Beach-Santa Ana",
+      "Mission Viejo--Lake Forest--San Clemente" = "Mission Viejo",
+      "Murrieta--Temecula--Menifee" = "Murrieta-Temecula-Menifee",
+      "Riverside--San Bernardino" = "Riverside-San Bernardino",
+      "San Francisco--Oakland" = "San Francisco-Oakland",
+      "Seaside--Monterey" = "Seaside-Monterey-Marina",
+      "Victorville--Hesperia" = "Victorville-Hesperia-Apple Valley",
+      "Yuma, AZ--CA Urbanized Area" = "Yuma, AZ-CA"
+    )
+  )
+
+
+#2000
+ua_county_2000_pop_w <- ua_county_2000_pop_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = cntyname,
+    ua_name    = uaname,
+    pop = pop2k
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+
+ua_county_2000_pop_w  <- ua_county_2000_pop_w  %>%
+  mutate(ua_name = str_remove(ua_name, ", CA$"))%>%
+  mutate(ua_name = str_remove(ua_name, fixed(", CA (UA)")))
+
+
+ua_county_2000_pop_w <- ua_county_2000_pop_w %>%
+  mutate(
+    ua_name = recode(ua_name,
+      "Antioch" = "Antioch-Pitt",
+      "Bakersfield" = "Bakersfield",
+      "Chico" = "Chico",
+      "Davis" = "Davis",
+      "Fairfield" = "Fairfield",
+      "Fresno" = "Fresno",
+      "Hemet" = "Hemet-San Jacinto",
+      "Victorville--Hesperia--Apple Valley" = "Hesperia-Appleval",
+      "Indio--Cathedral City--Palm Springs" = "Indio-Coachella",
+      "Lancaster--Palmdale" = "Lancaster-Palmdale",
+      "Lodi" = "Lodi",
+      "Lompoc" = "Lompoc",
+      "Los Angeles--Long Beach--Santa Ana" = "Los Angeles",
+      "Merced" = "Merced",
+      "Modesto" = "Modesto",
+      "Napa" = "Napa",
+      "Oxnard" = "Ox-Ventura",
+      "Redding" = "Redding",
+      "Riverside--San Bernardino" = "San Bern-Rvrside",
+      "Sacramento" = "Sacramento",
+      "Salinas" = "Salinas",
+      "San Diego" = "San Diego",
+      "San Francisco--Oakland" = "San Fran-Oakland",
+      "San Jose" = "San Jose",
+      "San Luis Obispo" = "San Luis Obispo",
+      "Santa Barbara" = "Santa Barbara",
+      "Santa Clarita" = "Santa Clarita",
+      "Santa Cruz" = "Santa Cruz",
+      "Santa Maria" = "Santa Maria",
+      "Santa Rosa" = "Santa Rosa",
+      "Seaside--Monterey--Marina" = "Seaside-Monterey",
+      "Simi Valley" = "Simi Valley",
+      "Stockton" = "Stockton",
+      "Vacaville" = "Vacaville",
+      "Visalia" = "Visalia",
+      "Watsonville" = "Watsonville",
+      "Yuba City" = "Yuba City",
+      "Yuma, AZ--CA (UA)" = "Yuma (Az-Ca)"
+    )
+  )
+
+
+ua_county_2000_land_w <- ua_county_2000_land_w %>%
+  slice(-1) %>%
+  rename(
+    ua_code    = ua,
+    county_fips = county,
+    county_name = cntyname,
+    ua_name    = uaname
+  ) %>%
+  filter(ua_code != 99999)  # drop "not in an urban area" rows
+
+
+ua_county_2000_land_w <- ua_county_2000_land_w %>%
+  mutate(ua_name = str_remove(ua_name, ", CA$"))%>%
+  mutate(ua_name = str_remove(ua_name, fixed(", CA (UA)"))) %>%
+  mutate(ua_name = recode(
+      ua_name,
+      "Antioch" = "Antioch-Pitt",
+      "Bakersfield" = "Bakersfield",
+      "Chico" = "Chico",
+      "Davis" = "Davis",
+      "Fairfield" = "Fairfield",
+      "Fresno" = "Fresno",
+      "Hemet" = "Hemet-San Jacinto",
+      "Victorville--Hesperia--Apple Valley" = "Hesperia-Appleval",
+      "Indio--Cathedral City--Palm Springs" = "Indio-Coachella",
+      "Lancaster--Palmdale" = "Lancaster-Palmdale",
+      "Lodi" = "Lodi",
+      "Lompoc" = "Lompoc",
+      "Los Angeles--Long Beach--Santa Ana" = "Los Angeles",
+      "Merced" = "Merced",
+      "Modesto" = "Modesto",
+      "Napa" = "Napa",
+      "Oxnard" = "Ox-Ventura",
+      "Redding" = "Redding",
+      "Riverside--San Bernardino" = "San Bern-Rvrside",
+      "Sacramento" = "Sacramento",
+      "Salinas" = "Salinas",
+      "San Diego" = "San Diego",
+      "San Francisco--Oakland" = "San Fran-Oakland",
+      "San Jose" = "San Jose",
+      "San Luis Obispo" = "San Luis Obispo",
+      "Santa Barbara" = "Santa Barbara",
+      "Santa Clarita" = "Santa Clarita",
+      "Santa Cruz" = "Santa Cruz",
+      "Santa Maria" = "Santa Maria",
+      "Santa Rosa" = "Santa Rosa",
+      "Seaside--Monterey--Marina" = "Seaside-Monterey",
+      "Simi Valley" = "Simi Valley",
+      "Stockton" = "Stockton",
+      "Vacaville" = "Vacaville",
+      "Visalia" = "Visalia",
+      "Watsonville" = "Watsonville",
+      "Yuba City" = "Yuba City",
+      "Yuma, AZ--CA (UA)" = "Yuma (Az-Ca)"
+    )
+  )
+
+
+#Join population weights with land weights
+ua_county_2020_pop_w <- ua_county_2020_pop_w %>%
+  left_join(ua_county_2020_land_w, by = c("ua_code", "county_fips","county_name", "ua_name")) %>%
+  rename(pop_weight = afact.x,
+         land_weight = afact.y)
+
+ua_county_2010_pop_w <- ua_county_2010_pop_w %>%
+  left_join(ua_county_2010_land_w, by = c("ua_code", "county_fips","county_name", "ua_name")) %>%
+  rename(pop_weight = afact.x,
+         land_weight = afact.y)
+
+ua_county_2000_pop_w <- ua_county_2000_pop_w %>%
+  left_join(ua_county_2000_land_w, by = c("ua_code", "county_fips","county_name", "ua_name")) %>%
+  rename(pop_weight = afact.x,
+         land_weight = afact.y)
+
+#unique(ua_county_2000_pop_w$ua_code) #224 Urban Areas
+#unique(ua_county_2000_pop_w$county_name) #58 counties
+
+
+#Join with VMT data
+county_miles_dvmt_23 <- ua_miles_dvmt_23 %>%
+  left_join(ua_county_2020_pop_w, by = "ua_name")
+
+county_miles_dvmt_13 <- ua_miles_dvmt_13 %>%
+  left_join(ua_county_2010_pop_w, by = "ua_name")
+
+county_miles_dvmt_03 <- ua_miles_dvmt_03 %>%
+  left_join(ua_county_2000_pop_w, by = "ua_name")
+
+#unique(county_miles_dvmt_03$county_name) 34 counties have been matched
+#unique(county_miles_dvmt_13$county_name) 35 counties have been matched
+#unique(county_miles_dvmt_23$county_name) 36 counties have been matched
+
+
+#Clean 2023
+county_miles_dvmt_23$pop <- as.numeric(county_miles_dvmt_23$pop)
+county_miles_dvmt_23$pop_weight <- as.numeric(county_miles_dvmt_23$pop_weight)
+county_miles_dvmt_23$LandSQMI <- as.numeric(county_miles_dvmt_23$LandSQMI)
+county_miles_dvmt_23$land_weight <- as.numeric(county_miles_dvmt_23$land_weight)
+
+#Clean 2013
+county_miles_dvmt_13$pop <- as.numeric(county_miles_dvmt_13$pop)
+county_miles_dvmt_13$pop_weight <- as.numeric(county_miles_dvmt_13$pop_weight)
+county_miles_dvmt_13$LandSQMI <- as.numeric(county_miles_dvmt_13$LandSQMI)
+county_miles_dvmt_13$land_weight <- as.numeric(county_miles_dvmt_13$land_weight)
+
+#Clean 2003
+county_miles_dvmt_03$pop <- as.numeric(county_miles_dvmt_03$pop)
+county_miles_dvmt_03$pop_weight <- as.numeric(county_miles_dvmt_03$pop_weight)
+county_miles_dvmt_03$LandSQMI <- as.numeric(county_miles_dvmt_03$LandSQMI)
+county_miles_dvmt_03$land_weight <- as.numeric(county_miles_dvmt_03$land_weight)
+
+
+#New data frame
+county_miles_dvmt_23_test <- county_miles_dvmt_23
+county_miles_dvmt_13_test <- county_miles_dvmt_13
+county_miles_dvmt_03_test <- county_miles_dvmt_03
+
+#2003
+county_miles_dvmt_03_test[, 2:21] <- lapply(county_miles_dvmt_03_test[, 2:21], function(x) as.numeric(gsub(",", "", x)))
+county_miles_dvmt_03_test[, 27]   <- as.numeric(gsub(",", "", county_miles_dvmt_03_test[, 27]))
+
+county_miles_dvmt_03_test[, 2:10] <- county_miles_dvmt_03_test[, 2:10] * county_miles_dvmt_03_test[, 29]
+county_miles_dvmt_03_test[, 11] <- county_miles_dvmt_03_test[, 11] * county_miles_dvmt_03_test[, 27]
+county_miles_dvmt_03_test[, 12:21] <- county_miles_dvmt_03_test[, 12:21] * county_miles_dvmt_03_test[, 29]
+
+county_miles_dvmt_03_test2 <- county_miles_dvmt_03_test %>%
+  group_by(county_fips, county_name) %>%
+  summarise(across(2:21, ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+
+#2013
+county_miles_dvmt_13_test[, 2:21] <- lapply(
+  county_miles_dvmt_13_test[, 2:21],
+  function(x) as.numeric(gsub(",", "", x))
+)
+
+county_miles_dvmt_13_test[, 27] <- as.numeric(gsub(",", "", county_miles_dvmt_13_test[, 27]))
+
+county_miles_dvmt_13_test[, 2:10]  <- county_miles_dvmt_13_test[, 2:10]  * county_miles_dvmt_13_test[, 29]
+county_miles_dvmt_13_test[, 11]    <- county_miles_dvmt_13_test[, 11]    * county_miles_dvmt_13_test[, 27]
+county_miles_dvmt_13_test[, 12:21] <- county_miles_dvmt_13_test[, 12:21] * county_miles_dvmt_13_test[, 29]
+
+county_miles_dvmt_13_test2 <- county_miles_dvmt_13_test %>%
+  group_by(county_fips, county_name) %>%
+  summarise(across(2:21, ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+#2023
+county_miles_dvmt_23_test[, 2:21] <- lapply(
+  county_miles_dvmt_23_test[, 2:21],
+  function(x) as.numeric(gsub(",", "", x))
+)
+
+county_miles_dvmt_23_test[, 27] <- as.numeric(gsub(",", "", county_miles_dvmt_23_test[, 27]))
+
+county_miles_dvmt_23_test[, 2:10]  <- county_miles_dvmt_23_test[, 2:10]  * county_miles_dvmt_23_test[, 29]
+county_miles_dvmt_23_test[, 11]    <- county_miles_dvmt_23_test[, 11]    * county_miles_dvmt_23_test[, 27]
+county_miles_dvmt_23_test[, 12:21] <- county_miles_dvmt_23_test[, 12:21] * county_miles_dvmt_23_test[, 29]
+
+county_miles_dvmt_23_test2 <- county_miles_dvmt_23_test %>%
+  group_by(county_fips, county_name) %>%
+  summarise(across(2:21, ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+
+#Join 2003-2023
+county_miles_dvmt_23_test2$year <- 2023
+county_miles_dvmt_13_test2$year <- 2013
+county_miles_dvmt_03_test2$year <- 2003
+
+county_miles_dvmt_0323 <- county_miles_dvmt_23_test2 %>% rbind(county_miles_dvmt_13_test2, county_miles_dvmt_03_test2)
+
+county_miles_dvmt_0323 <- county_miles_dvmt_0323 %>%
+  mutate(mi_mru = mi_fw_exp + mi_other + mi_minart + mi_col) %>%
+  mutate(dvmt_mru = dvmt_fw_exp + dvmt_other + dvmt_minart + dvmt_macol + dvmt_mincol)
+
+#Save output
+path_out <- "2_Data Cleaning//Code_Output"
+write.csv(county_miles_dvmt_0323, file.path(path_out, "counties_dvmt_pop_0323.csv"), row.names=FALSE)
+
+#Clean directory
+rm(list = ls())
+
+```
+
+
+##Section 5: HPMS PRD Dataset Table 2:  Maintained Miles, Lane Miles and Annual Vehicle Miles  of Travel (AVMT)  by Functional Classification
+Caltrans’ PRD provides high-quality roadway statistics for California, but its lane‑mile measures are reported only as total lane miles per county, without a breakdown by functional road type (e.g., Interstate Highway, Principal Arterial, Minor Arterial). Because the empirical strategy requires lane‑mile estimates by functional classification—matching the structure of FHWA HPMS data—we use Table 2 of the PRD report, which reports statewide maintained lane miles by functional class, to allocate these totals to counties.
+
+The approach is proportional and uses the assumption that counties share the same functional‑class composition of lane miles as the state overall. Specifically, for each year, we calculate each county’s share of statewide total lane miles using the county‑level PRD totals constructed in Section 4. This share is then multiplied by the statewide maintained lane‑mile total for the relevant functional class from PRD Table 2. For example, a county’s Interstate Highway lane‑mile estimate is computed as:
+
+(County’s share of statewide total lane miles from PRD) × (Statewide Interstate lane miles from PRD Table 2)
+
+The same procedure is applied to estimate county-level lane miles for Major Urban Roads, using the sum of statewide lane miles for relevant functional classes. This proportional allocation method produces functional‑class‑specific lane‑mile estimates consistent with Caltrans reporting and ensures compatibility with the broader HPMS framework used in the analysis.
+```{r, results = FALSE, warning=FALSE}
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+# Step 1: Read the csv files
+prd_maintained_miles <- read_csv("1_Source Data/HPMS PRD/prd_maintainedmiles_lanemiles_avmt_0323.csv")
+
+counties_dvmt_pop <- read.csv("2_Data Cleaning/Code_Output/counties_dvmt_pop_0323.csv")
+
+
+#Step 2, data wrangle
+
+prd_maintained_miles$lane_factor <-  prd_maintained_miles$lane_miles / prd_maintained_miles$miles
+
+lane_factor_ih_03 <- prd_maintained_miles$lane_factor[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2003
+]
+
+lane_factor_ih_13 <- prd_maintained_miles$lane_factor[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2013
+]
+
+lane_factor_ih_23 <- prd_maintained_miles$lane_factor[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2023
+]
+
+
+prd_maintained_miles <- prd_maintained_miles %>%
+  group_by(year) %>%
+  mutate(
+    lane_miles_mru_share = if_else(
+      f_code %in% 2:5,
+      lane_miles / sum(lane_miles[f_code %in% 2:5]),
+      NA_real_
+    )
+  ) %>%
+  ungroup()
+
+prd_maintained_miles$lane_factor_mru_share <- prd_maintained_miles$lane_factor *prd_maintained_miles$lane_miles_mru_share
+
+
+lane_factor_mru_03 <- sum(
+  prd_maintained_miles$lane_factor_mru_share[
+    prd_maintained_miles$year == 2003
+  ],
+  na.rm = TRUE
+)
+
+lane_factor_mru_13 <- sum(
+  prd_maintained_miles$lane_factor_mru_share[
+    prd_maintained_miles$year == 2013
+  ],
+  na.rm = TRUE
+)
+
+lane_factor_mru_23 <- sum(
+  prd_maintained_miles$lane_factor_mru_share[
+    prd_maintained_miles$year == 2023
+  ],
+  na.rm = TRUE
+)
+
+
+
+counties_dvmt_pop <- counties_dvmt_pop %>%
+  mutate(
+    lane_miles_ih = case_when(
+      year == 2023 ~ mi_ih * lane_factor_ih_23,
+      year == 2013 ~ mi_ih * lane_factor_ih_13,
+      year == 2003 ~ mi_ih * lane_factor_ih_03,
+      TRUE ~ NA_real_
+    )
+  )
+
+counties_dvmt_pop <- counties_dvmt_pop %>%
+  mutate(
+    lane_miles_mru = case_when(
+      year == 2023 ~ mi_mru * lane_factor_mru_23,
+      year == 2013 ~ mi_mru * lane_factor_mru_13,
+      year == 2003 ~ mi_mru * lane_factor_mru_03,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+lane_miles_ih_23 <- prd_maintained_miles$lane_miles[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2023
+]
+
+lane_miles_ih_13 <- prd_maintained_miles$lane_miles[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2013
+]
+
+lane_miles_ih_03 <- prd_maintained_miles$lane_miles[
+  prd_maintained_miles$f_code == 1 &
+  prd_maintained_miles$year == 2003
+]
+
+
+#Second set that will be used
+counties_dvmt_pop <- counties_dvmt_pop %>%
+  group_by(year) %>%
+  mutate(
+    lane_miles_ih2 =
+      lane_miles / sum(lane_miles, na.rm = TRUE) *
+      case_when(
+        year == 2003 ~ lane_miles_ih_03,
+        year == 2013 ~ lane_miles_ih_13,
+        year == 2023 ~ lane_miles_ih_23
+      )
+  ) %>%
+  ungroup()
+
+
+#Test
+test <- counties_dvmt_pop %>%
+  group_by(year) %>%
+  mutate(
+    lane_miles_ih2 =
+      lane_miles / sum(lane_miles, na.rm = TRUE) *
+      case_when(
+        year == 2003 ~ lane_miles_ih_03,
+        year == 2013 ~ lane_miles_ih_13,
+        year == 2023 ~ lane_miles_ih_23
+      )
+  ) %>%
+  ungroup()
+
+
+lane_miles_mru_23 <- sum(
+  prd_maintained_miles$lane_miles[
+    prd_maintained_miles$f_code %in% 2:5 &
+    prd_maintained_miles$year == 2023
+  ],
+  na.rm = TRUE
+)
+
+lane_miles_mru_13 <- sum(
+  prd_maintained_miles$lane_miles[
+    prd_maintained_miles$f_code %in% 2:5 &
+    prd_maintained_miles$year == 2013
+  ],
+  na.rm = TRUE
+)
+
+lane_miles_mru_03 <- sum(
+  prd_maintained_miles$lane_miles[
+    prd_maintained_miles$f_code %in% 2:5 &
+    prd_maintained_miles$year == 2003
+  ],
+  na.rm = TRUE
+)
+
+counties_dvmt_pop <- counties_dvmt_pop %>%
+  group_by(year) %>%
+  mutate(
+    # county share of statewide lane miles for that year
+    lane_miles_rate = lane_miles / sum(lane_miles, na.rm = TRUE),
+
+    # multiply rate by correct expansion factor
+    lane_miles_mru2 = lane_miles_rate * case_when(
+      year == 2003 ~ lane_miles_mru_03,
+      year == 2013 ~ lane_miles_mru_13,
+      year == 2023 ~ lane_miles_mru_23,
+      TRUE ~ NA_real_
+    )
+  ) %>%
+  ungroup()
+
+#Save output
+path_out <- "2_Data Cleaning//Code_Output"
+write.csv(counties_dvmt_pop, file.path(path_out, "counties_dvmt_pop_0323_ct.csv"), row.names=FALSE)
+
+#Clean directory
+rm(list = ls())
+
+
+```
+
+
+##Section 6: Prepare Database for Regression
+The following batch looks to join vmt, lane miles, and miles data from FHWA and PRD to have one harmonized data set to then be joined with socioeconomic variables from PUMS. It transforms data from a wide format into a long format, which is what is needed for panel data regressions.
+```{r, results = FALSE, warning=FALSE}
+#Set working directory
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+# Step 1: Read the csv files
+hpms_ca_8323_ct <- read_csv("2_Data Cleaning/Code_Output/hpms_ca_8323_ct.csv")
+
+counties_dvmt_pop <- read.csv("2_Data Cleaning/Code_Output/counties_dvmt_pop_0323_ct.csv")
+
+counties_fips_code <- read_csv("1_Source Data/Census Bureau/State,_County_and_City_FIPS_Reference_Table_20260807.csv")
+
+counties_fips_code <- counties_fips_code%>%
+  select(`StCnty FIPS Code`, `County Name`) %>%
+  rename(county_fips = `StCnty FIPS Code`,
+         county_name = `County Name`)
+
+hpms_ca_8323_ct <- hpms_ca_8323_ct %>%
+ left_join(counties_fips_code,
+    by = "county_fips")
+
+data <- counties_dvmt_pop %>%
+  select(
+    county_fips,
+    county_name,
+    year,
+    ua_pop,
+    ua_sqmi,
+    mi_ih,
+    dvmt_ih,
+    lane_miles_ih = lane_miles_ih2,
+    mi_mru,
+    dvmt_mru,
+    lane_miles_mru = lane_miles_mru2
+  ) %>%
+  filter(!is.na(county_fips))
+
+data <- data %>%
+  mutate(ua_pop = ua_pop * 1000)
+
+data_long <- data %>%
+  pivot_longer(
+    cols = c(mi_ih, dvmt_ih, lane_miles_ih,
+             mi_mru, dvmt_mru, lane_miles_mru),
+    names_to = c(".value", "type"),
+    names_pattern = "(.+)_(ih|mru)$"
+  ) %>%
+  rename(
+    county = county_name,
+    vmt = dvmt,
+    miles = mi
+  ) %>%
+  mutate(ct_yr = paste0(county_fips, "-", year)) %>%
+  select(
+    county,
+    year,
+    vmt,
+    miles,
+    lane_miles,
+    type,
+    county_fips,
+    ct_yr,
+    ua_pop,
+    ua_sqmi
+  )
+
+data_long <- data_long %>%
+  rename(
+    vmt_prd = vmt,
+    miles_prd = miles,
+    lane_miles_prd = lane_miles
+  )
+
+new_rows <- data_long %>%
+  distinct(county_fips, county, type) %>%
+  crossing(year = c(1983, 1993)) %>%
+  mutate(
+    vmt_prd = NA_real_,
+    miles_prd = NA_real_,
+    lane_miles_prd = NA_real_,
+    ua_pop = NA_real_,
+    ua_sqmi = NA_real_,
+    ct_yr = paste0(county_fips, "-", year)
+  ) %>%
+  select(names(data_long))
+
+data_long <- bind_rows(data_long, new_rows) %>%
+  arrange(county_fips, type, year)
+
+data_long$county_fips <- as.character(data_long$county_fips)
+
+hpms_ca_8323_ct2 <- hpms_ca_8323_ct %>%
+  rename(
+    vmt_fhwa = vmt,
+    miles_fhwa = miles,
+    lane_miles_fhwa = lane_miles
+  ) %>%
+  select(-county,)
+
+hpms_ca_8323_ct2$county_fips <- as.character(hpms_ca_8323_ct2$county_fips)
+
+#unique(hpms_ca_8323_ct2$county_fips)
+#unique(counties_dvmt_pop$county_fips)
+#unique(data_long$county_fips)
+
+data_join <- hpms_ca_8323_ct2 %>%
+ left_join(data_long,
+    by = c("year",
+      "type",
+      "county_fips",
+      "ct_yr"
+    )
+  ) %>%
+  select(ct_yr, year, county_fips, county_name, type,vmt_prd, vmt_fhwa, miles_prd, miles_fhwa, lane_miles_prd, lane_miles_fhwa, ua_pop) %>%
+  rename(f_system = type)
+
+
+
+#Save output
+path_out <- "2_Data Cleaning//Code_Output"
+write.csv(data_join, file.path(path_out, "hpms_ipums_8323_2026.csv"), row.names=FALSE)
+
+#Clean directory
+rm(list = ls())
+
+
+```
+
+
+
+##Section 7: Join HPMS with IPUMS/ACS and DMV
+Finally, join vmt and lane mile data with County level PUMS and DMV data to have a finalized panel data set.
+```{r, results = FALSE, warning=FALSE}
+
+#Set working directory
+
+setwd("C:/Users/afr/OneDrive - San Diego Association of Governments/Data Science - Documents/Economics/FY2026_27 Projects/Misc Projects/Elasticity of Lane Miles")
+
+hpms_ca <- read.csv("2_Data Cleaning/Code_Output/hpms_ipums_8323_2026.csv")
+
+ipums_ca <- read.csv("2_Data Cleaning/Code_Output/ca_ipums_ct.csv")
+
+census_ca <- read.csv("1_Source Data/Census Bureau/counties_CA_socioeconomic.csv") #There may be an issue because population was drawn from UA and this from County
+
+dmv_ca <- read.csv("1_Source Data/CA_DMV/dmv_veh.csv")
+
+acs_ca_0323 <- read.csv("2_Data Cleaning/Code_Output/ca_acs_ct_03_23.csv")
+acs_ca_8393 <- read.csv("2_Data Cleaning/Code_Output/ca_acs_ct_83_93.csv")
+
+acs_ca_8393 <- acs_ca_8393 %>%
+  select(ct_yr, median_household_income, unemployment_rate,poverty_rate,bachelors_plus_rate)
+
+acs_ca_0323 <- acs_ca_0323 %>%
+  select(ct_yr, median_household_income, unemployment_rate,poverty_rate,bachelors_plus_rate)
+
+acs_ca_8323 <- rbind(acs_ca_8393, acs_ca_0323)
+
+acs_ca_8323 <- acs_ca_8323 %>%
+  rename(s_emp = unemployment_rate,
+         s_poverty = poverty_rate,
+         educ = bachelors_plus_rate)
+
+#ipums_ca$county_fips <- ipums_ca$COUNTYFIP + 6000
+
+#ipums_ca$county_fips <- as.character(ipums_ca$county_fips)
+
+#ipums_ca$year_hpms <- ipums_ca$YEAR + 3 
+
+#ipums_ca$year_hpms <- as.character(ipums_ca$year_hpms)
+
+#ipums_ca <- ipums_ca %>%
+ # mutate(
+#    year_hpms = as.character(year_hpms),
+#    ct_yr = paste0(county_fips, "-", year_hpms)
+#  )
+
+data_join <- hpms_ca %>%
+ left_join(acs_ca_8323,
+    by = c("ct_yr"
+    )
+  ) 
+
+data_join <- data_join %>%
+    mutate(vmt_prd = if_else(year %in% c(1983, 1993),
+                      vmt_fhwa,
+                      vmt_prd),
+           miles_prd = if_else(year %in% c(1983, 1993),
+                      miles_fhwa,
+                      miles_prd),
+           lane_miles_prd = if_else(year %in% c(1983, 1993),
+                      lane_miles_fhwa,
+                      lane_miles_prd)
+    ) %>%
+  mutate(ct_yr2 = paste0(ct_yr, "-", f_system))
+
+census_ca <- census_ca %>%
+  rename(ct_yr=county_year) %>%
+  select(ct_yr, population)
+
+census_ca$population <- as.numeric(census_ca$population)
+
+dmv_ca <- dmv_ca %>%
+  select(ct_yr, drivers_licence, total_veh)
+
+data_join <- data_join %>%
+  left_join(census_ca,
+            by =  "ct_yr") %>%
+  select(-ct_yr2)
+
+data_join <- data_join %>%
+  left_join(dmv_ca,
+            by =  "ct_yr") 
+
+#Save output
+path_out <- "2_Data Cleaning//Code_Output"
+write.csv(data_join, file.path(path_out, "hpms_ipums_counties_8323_2026.csv"), row.names=FALSE)
+
+#Clean directory
+rm(list = ls())
+
+
+```
+
+
+
+
+
