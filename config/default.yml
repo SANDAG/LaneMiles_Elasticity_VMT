@@ -1,0 +1,13 @@
+
+# Lane Miles Data Preparation
+# Shared configuration
+
+# Input and output directories
+paths:
+  input_dir: "data/raw"
+  output_dir: "data/processed"
+
+# IPUMS data preparation
+ipums:
+  ddi_file: "IPUMS/usa_00001.xml"
+  output_file: "st_ipums_ct.csv"

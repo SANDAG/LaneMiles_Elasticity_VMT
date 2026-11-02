@@ -1,0 +1,19 @@
+
+# RStudio temporary files
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Personal configuration (not shared)
+config/local.yml
+
+# Source and processed datasets
+data/raw/
+data/processed/
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
