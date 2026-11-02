@@ -1,0 +1,312 @@
+---
+title: "IPUMS County Data Preparation"
+output: html_document
+---
+
+## 1. Setup
+
+This notebook prepares county-level socioeconomic
+variables from IPUMS USA microdata for use in
+roadway lane-mile statistical estimation.
+
+Source: IPUMS USA
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(ipumsr)
+
+# Load project configuration
+source(here::here("R", "load_config.R"))
+cfg <- load_config()
+
+# Define IPUMS input file
+ipums_file <- file.path(
+  cfg$paths$input_dir,
+  cfg$ipums$ddi_file
+)
+
+stopifnot(file.exists(ipums_file))
+```
+
+## 2. Load IPUMS Metadata
+
+The DDI XML file describes the variables,
+labels, and structure of the IPUMS extract.
+
+```{r load-metadata}
+ddi <- read_ipums_ddi(ipums_file)
+
+print(ddi)
+```
+
+## 3. Load and Inspect IPUMS Microdata
+
+This section loads the IPUMS person-level microdata
+and checks that the variables needed for county-level
+aggregation are available.
+
+```{r load-microdata}
+# Read the microdata associated with the DDI file
+ipums_data <- read_ipums_micro(ddi)
+
+# Check dataset dimensions
+cat("Rows:", nrow(ipums_data), "\n")
+cat("Columns:", ncol(ipums_data), "\n")
+
+# Inspect available variables
+names(ipums_data)
+
+# Check variables required by the original workflow
+required_vars <- c(
+  "YEAR", "STATEFIP", "COUNTYFIP",
+  "IND", "EMPSTAT", "EDUCD",
+  "AUTOS", "VEHICLES", "POVERTY",
+  "HHINCOME", "HHWT", "PERWT"
+)
+
+missing_vars <- setdiff(
+  required_vars,
+  names(ipums_data)
+)
+
+if (length(missing_vars) > 0) {
+  stop(
+    "Missing IPUMS variables: ",
+    paste(missing_vars, collapse = ", ")
+  )
+}
+
+cat("All required variables are present.\n")
+```
+
+```{r inspect-coverage}
+# Check available years
+sort(unique(ipums_data$YEAR))
+
+# Check available states
+sort(unique(ipums_data$STATEFIP))
+
+# Count records by year and state
+ipums_data %>%
+  count(YEAR, STATEFIP) %>%
+  arrange(YEAR, STATEFIP) %>%
+  print(n = Inf)
+```
+
+## 4. Filter States and Create Variables
+
+The original analysis includes eight western states:
+CA, OR, WA, AZ, UT, NV, ID, and NM.
+
+```{r prepare-variables}
+# State FIPS codes
+selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+
+st_ipums <- ipums_data %>%
+  filter(STATEFIP %in% selected_states) %>%
+  mutate(
+    # Construct county FIPS identifier
+    FIPS = STATEFIP * 1000 + COUNTYFIP,
+
+    # Identify manufacturing industry employment
+    manuf = case_when(
+      YEAR %in% c(1980, 1990, 2000) &
+        IND >= 100 & IND <= 392 ~ 1,
+
+      YEAR >= 2000 &
+        IND >= 2000 & IND <= 3990 ~ 1,
+
+      TRUE ~ 0
+    )
+  )
+
+cat("Filtered observations:", nrow(st_ipums), "\n")
+cat("Unique county/year combinations:",
+    nrow(distinct(st_ipums, FIPS, YEAR)), "\n")
+```
+
+## 5. Validate Geographic Coverage
+
+```{r validate-geography}
+# Records by state and year
+st_ipums %>%
+  count(STATEFIP, YEAR) %>%
+  arrange(STATEFIP, YEAR) %>%
+  print(n = Inf)
+
+# Check county identifiers
+st_ipums %>%
+  summarise(
+    missing_county = sum(is.na(COUNTYFIP)),
+    unidentified_county = sum(
+      COUNTYFIP == 0, na.rm = TRUE
+    ),
+    manufacturing_records = sum(manuf, na.rm = TRUE)
+  )
+```
+
+## 6. Create Socioeconomic Indicators
+
+Create indicators for employment, education, vehicle
+ownership, and poverty using the original methodology.
+
+```{r socioeconomic-indicators}
+st_ipums <- st_ipums %>%
+  mutate(
+    # Employment indicator
+    emp = ifelse(EMPSTAT == 1, 1, 0),
+
+    # Education indicator
+    educ = ifelse(as.numeric(EDUCD) >= 70, 1, 0),
+
+    # Vehicle ownership
+    auto = ifelse(YEAR == 1980, AUTOS, VEHICLES),
+
+    # Poverty indicator
+    poverty_d = ifelse(
+      POVERTY > 0 & POVERTY < 100, 1, 0
+    )
+  ) %>%
+  group_by(FIPS, YEAR) %>%
+  mutate(
+    poverty_s = sum(poverty_d) / n()
+  ) %>%
+  ungroup()
+```
+
+## 7. Validate Socioeconomic Indicators
+
+```{r validate-indicators}
+st_ipums %>%
+  summarise(
+    total_records = n(),
+    employed = sum(emp == 1, na.rm = TRUE),
+    educated = sum(educ == 1, na.rm = TRUE),
+    poverty_records = sum(poverty_d == 1, na.rm = TRUE),
+    missing_poverty = sum(is.na(poverty_d)),
+    missing_poverty_share = sum(is.na(poverty_s)),
+    missing_auto = sum(is.na(auto))
+  )
+
+# Examine a few records
+st_ipums %>%
+  select(
+    FIPS, YEAR, emp, educ,
+    auto, poverty_d, poverty_s
+  ) %>%
+  head(10)
+```
+
+## 8. Aggregate to County-Year Level
+
+Aggregate individual IPUMS observations to county-year
+records using the weights and definitions from the
+original LaneMiles_Workbook.Rmd.
+
+```{r aggregate-county}
+st_ipums_ct <- st_ipums %>%
+  group_by(FIPS, YEAR) %>%
+  filter(
+    HHINCOME < 999999,
+    !is.na(HHINCOME)
+  ) %>%
+  summarise(
+    avg_hh_income = weighted.mean(HHINCOME, HHWT),
+    s_emp = weighted.mean(emp, PERWT),
+    s_poverty = weighted.mean(poverty_s, PERWT),
+    d_poverty = weighted.mean(poverty_d, PERWT),
+    educ = weighted.mean(educ, PERWT),
+    auto = weighted.mean(auto, HHWT),
+    auto_n = sum(auto * HHWT),
+    s_manuf = weighted.mean(manuf, PERWT),
+    .groups = "drop"
+  )
+
+cat("County-year records:", nrow(st_ipums_ct), "\n")
+
+head(st_ipums_ct, 10)
+```
+
+## 9. Validate County-Level Output
+
+```{r validate-county}
+# 1. Check record count
+cat("Total records:", nrow(st_ipums_ct), "\n")
+
+# 2. Check unique county-year combinations
+duplicates <- st_ipums_ct %>%
+  count(FIPS, YEAR) %>%
+  filter(n > 1)
+
+cat("Duplicate county-years:", nrow(duplicates), "\n")
+
+# 3. Check missing values
+missing_summary <- st_ipums_ct %>%
+  summarise(
+    across(
+      everything(),
+      ~ sum(is.na(.x))
+    )
+  )
+
+print(missing_summary, width = Inf)
+
+# 4. Check unidentified counties
+unidentified <- st_ipums_ct %>%
+  filter(is.na(FIPS) | FIPS %% 1000 == 0)
+
+cat("Unidentified county-year records:",
+    nrow(unidentified), "\n")
+
+# 5. Check year coverage
+st_ipums_ct %>%
+  count(YEAR) %>%
+  print(n = Inf)
+
+# 6. Inspect variable distributions
+summary(st_ipums_ct)
+```
+
+## 10. Export County-Level IPUMS Dataset
+
+Save the processed dataset to the configured output
+directory and verify the exported file.
+
+```{r export-ipums}
+# Create output directory if it does not exist
+dir.create(
+  cfg$paths$output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Construct output file path
+output_file <- file.path(
+  cfg$paths$output_dir,
+  cfg$ipums$output_file
+)
+
+# Write CSV
+write.csv(
+  st_ipums_ct,
+  output_file,
+  row.names = FALSE
+)
+
+cat("Dataset saved to:", output_file, "\n")
+
+# Read the CSV back for verification
+exported_data <- read.csv(output_file)
+
+# Verify dimensions and column names
+stopifnot(
+  nrow(exported_data) == nrow(st_ipums_ct),
+  identical(names(exported_data), names(st_ipums_ct))
+)
+
+cat("Export verification passed.\n")
+cat("Rows:", nrow(exported_data), "\n")
+cat("Columns:", ncol(exported_data), "\n")
+```
