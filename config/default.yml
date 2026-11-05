@@ -10,4 +10,4 @@ paths:
 # IPUMS data preparation
 ipums:
   ddi_file: "IPUMS/usa_00001.xml"
-  output_file: "st_ipums_ct.csv"
+  output_file: "NHGIS_ct.csv"

@@ -6,7 +6,7 @@ output: html_document
 ## 1. Setup
 
 This notebook prepares county-level socioeconomic
-variables from IPUMS USA microdata for use in
+variables from IPUMS NHGIS county level data  for use in
 roadway lane-mile statistical estimation.
 
 Source: IPUMS USA
@@ -21,255 +21,382 @@ library(ipumsr)
 source(here::here("R", "load_config.R"))
 cfg <- load_config()
 
-# Define IPUMS input file
-ipums_file <- file.path(
+# Define IPUMS input 
+
+NHGIS_dir <- file.path(
   cfg$paths$input_dir,
-  cfg$ipums$ddi_file
+  cfg$nhgis$data_dir
 )
 
-stopifnot(file.exists(ipums_file))
+
+
+stopifnot(dir.exists(NHGIS_dir))
 ```
 
-## 2. Load IPUMS Metadata
+## 2. Load IPUMS HSGIS data and filter to states we want
 
-The DDI XML file describes the variables,
-labels, and structure of the IPUMS extract.
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
 
-```{r load-metadata}
-ddi <- read_ipums_ddi(ipums_file)
 
-print(ddi)
-```
 
-## 3. Load and Inspect IPUMS Microdata
-
-This section loads the IPUMS person-level microdata
-and checks that the variables needed for county-level
-aggregation are available.
-
-```{r load-microdata}
-# Read the microdata associated with the DDI file
-ipums_data <- read_ipums_micro(ddi)
-
-# Check dataset dimensions
-cat("Rows:", nrow(ipums_data), "\n")
-cat("Columns:", ncol(ipums_data), "\n")
-
-# Inspect available variables
-names(ipums_data)
-
-# Check variables required by the original workflow
-required_vars <- c(
-  "YEAR", "STATEFIP", "COUNTYFIP",
-  "IND", "EMPSTAT", "EDUCD",
-  "AUTOS", "VEHICLES", "POVERTY",
-  "HHINCOME", "HHWT", "PERWT"
+csv_files <- list.files(
+  path = NHGIS_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
 )
 
-missing_vars <- setdiff(
-  required_vars,
-  names(ipums_data)
-)
+csv_files
 
-if (length(missing_vars) > 0) {
-  stop(
-    "Missing IPUMS variables: ",
-    paste(missing_vars, collapse = ", ")
-  )
-}
+NHGIS_2010 <-read.csv(csv_files[[1]]) ## contains employment industry occupation for 2010
 
-cat("All required variables are present.\n")
-```
+NHGIS_2020 <- read.csv(csv_files[[2]]) ## contains employment industry occupation for 2020  
 
-```{r inspect-coverage}
-# Check available years
-sort(unique(ipums_data$YEAR))
+NHGIS_1980 <- read.csv(csv_files[[3]]) ##  contains employment industry occupation numbers for 1980
 
-# Check available states
-sort(unique(ipums_data$STATEFIP))
+NHGIS_1990 <- read.csv(csv_files[[4]]) ## contains employment industry occupation (used) and vehicles per Hispanic HH (not used)
 
-# Count records by year and state
-ipums_data %>%
-  count(YEAR, STATEFIP) %>%
-  arrange(YEAR, STATEFIP) %>%
-  print(n = Inf)
-```
+NHGIS_2000  <-read.csv(csv_files[[5]]) ## contains industry by sex will need to combine
 
-## 4. Filter States and Create Variables
+NHGIS_TS <- read.csv(csv_files[[6]])  ## time series contains most of the variables
 
-The original analysis includes eight western states:
-CA, OR, WA, AZ, UT, NV, ID, and NM.
+## now filter
 
-```{r prepare-variables}
-# State FIPS codes
 selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
 
-st_ipums <- ipums_data %>%
-  filter(STATEFIP %in% selected_states) %>%
-  mutate(
-    # Construct county FIPS identifier
-    FIPS = STATEFIP * 1000 + COUNTYFIP,
+NHGIS_1980 <- NHGIS_1980 %>%
+  filter(STATEA %in% selected_states)
 
-    # Identify manufacturing industry employment
-    manuf = case_when(
-      YEAR %in% c(1980, 1990, 2000) &
-        IND >= 100 & IND <= 392 ~ 1,
+NHGIS_1990 <- NHGIS_1990 %>%
+  filter(STATEA %in% selected_states)
 
-      YEAR >= 2000 &
-        IND >= 2000 & IND <= 3990 ~ 1,
+NHGIS_2000 <- NHGIS_2000 %>%
+  filter(STATEA %in% selected_states)
 
-      TRUE ~ 0
-    )
+NHGIS_2010 <- NHGIS_2010 %>%
+  mutate(FIPS = substr(Geography, nchar(Geography) - 4, nchar(Geography)), ## pulls FIPS out of geography
+         STATEA = as.integer(substr(FIPS, 1, 2)),
+         COUNTYA = as.integer(substr(FIPS, 3,5)),
+         FIPS = as.integer(FIPS)) %>% 
+  filter(STATEA %in% selected_states)
+
+NHGIS_2020 <- NHGIS_2020 %>%
+  mutate(FIPS = substr(Geography, nchar(Geography) - 4, nchar(Geography)), ## pulls FIPS out of geography
+         STATEA = as.integer(substr(FIPS, 1, 2)),
+         COUNTYA = as.integer(substr(FIPS, 3,5)),
+         FIPS = as.integer(FIPS)) %>% 
+  filter(STATEA %in% selected_states)
+ 
+ NHGIS_TS <- NHGIS_TS %>%
+   filter(STATEFP %in% selected_states) %>%
+   rename(STATEA =STATEFP,
+          COUNTYA = COUNTYFP)%>%
+   mutate(FIPS= STATEA*1000+COUNTYA)
+
+
+
+```
+## 2. Replacing NHGIS column names with actual variable names
+
+```{r}
+## the NHGIS data comes with non descriptive column names with the actual variables
+## names stored in accompanying text files.  This code chunk replaces those to help 
+## make using the data easier and also for later merges
+
+# starting with TS
+
+## renaming the Time series varriable names
+NHGIS_TS <- NHGIS_TS %>%
+  rename(
+    pop_total = A00AA,
+
+    pop_urban = D15AA,
+    pop_rural = D15AB,
+
+    edu_lt9 = B85AA,
+    edu_9to12_nodiploma = B85AB,
+    edu_hs_ged = B85AC,
+    edu_somecollege = B85AD,
+    edu_associates = B85AE,
+    edu_bachelors = B85AF,
+    edu_gradprof = B85AG,
+
+    lf_total = B84AA,
+    lf_armedforces = B84AB,
+    lf_civilian = B84AC,
+    lf_employed = B84AD,
+    lf_unemployed = B84AE,
+    lf_notin = B84AF,
+
+    commuters = CW0AA,
+
+    pci = BD5AA,
+
+    poverty = CL6AA,
+
+    moe_edu_lt9 = B85AAM,
+    moe_edu_9to12_nodiploma = B85ABM,
+    moe_edu_hs_ged = B85ACM,
+    moe_edu_somecollege = B85ADM,
+    moe_edu_associates = B85AEM,
+    moe_edu_bachelors = B85AFM,
+    moe_edu_gradprof = B85AGM,
+
+    moe_lf_total = B84AAM,
+    moe_lf_armedforces = B84ABM,
+    moe_lf_civilian = B84ACM,
+    moe_lf_employed = B84ADM,
+    moe_lf_unemployed = B84AEM,
+    moe_lf_notin = B84AFM,
+
+    moe_commuters = CW0AAM,
+
+    moe_pci = BD5AAM,
+
+    moe_poverty = CL6AAM
   )
 
-cat("Filtered observations:", nrow(st_ipums), "\n")
-cat("Unique county/year combinations:",
-    nrow(distinct(st_ipums, FIPS, YEAR)), "\n")
-```
+## renaming the 1980 varriable names
+NHGIS_1980 <- NHGIS_1980 %>% 
+  rename(
+    ind_ag_mining = DIA001,
+    ind_construction = DIA002,
+    ind_mfg_nondurable = DIA003,
+    ind_mfg_durable = DIA004,
+    ind_transportation = DIA005,
+    ind_utilities = DIA006,
+    ind_wholesale = DIA007,
+    ind_retail = DIA008,
+    ind_fire = DIA009,              # Finance, Insurance, Real Estate
+    ind_business_repair = DIA010,
+    ind_personal_services = DIA011,
+    ind_health = DIA012,
+    ind_education = DIA013,
+    ind_other_professional = DIA014,
+    ind_public_admin = DIA015,
 
-## 5. Validate Geographic Coverage
-
-```{r validate-geography}
-# Records by state and year
-st_ipums %>%
-  count(STATEFIP, YEAR) %>%
-  arrange(STATEFIP, YEAR) %>%
-  print(n = Inf)
-
-# Check county identifiers
-st_ipums %>%
-  summarise(
-    missing_county = sum(is.na(COUNTYFIP)),
-    unidentified_county = sum(
-      COUNTYFIP == 0, na.rm = TRUE
-    ),
-    manufacturing_records = sum(manuf, na.rm = TRUE)
-  )
-```
-
-## 6. Create Socioeconomic Indicators
-
-Create indicators for employment, education, vehicle
-ownership, and poverty using the original methodology.
-
-```{r socioeconomic-indicators}
-st_ipums <- st_ipums %>%
-  mutate(
-    # Employment indicator
-    emp = ifelse(EMPSTAT == 1, 1, 0),
-
-    # Education indicator
-    educ = ifelse(as.numeric(EDUCD) >= 70, 1, 0),
-
-    # Vehicle ownership
-    auto = ifelse(YEAR == 1980, AUTOS, VEHICLES),
-
-    # Poverty indicator
-    poverty_d = ifelse(
-      POVERTY > 0 & POVERTY < 100, 1, 0
-    )
-  ) %>%
-  group_by(FIPS, YEAR) %>%
-  mutate(
-    poverty_s = sum(poverty_d) / n()
-  ) %>%
-  ungroup()
-```
-
-## 7. Validate Socioeconomic Indicators
-
-```{r validate-indicators}
-st_ipums %>%
-  summarise(
-    total_records = n(),
-    employed = sum(emp == 1, na.rm = TRUE),
-    educated = sum(educ == 1, na.rm = TRUE),
-    poverty_records = sum(poverty_d == 1, na.rm = TRUE),
-    missing_poverty = sum(is.na(poverty_d)),
-    missing_poverty_share = sum(is.na(poverty_s)),
-    missing_auto = sum(is.na(auto))
+    veh_1 = DFG001,
+    veh_2 = DFG002,
+    veh_3plus = DFG003
   )
 
-# Examine a few records
-st_ipums %>%
-  select(
-    FIPS, YEAR, emp, educ,
-    auto, poverty_d, poverty_s
-  ) %>%
-  head(10)
-```
+# renaming 1990 industry names
 
-## 8. Aggregate to County-Year Level
+NHGIS_1990 <- NHGIS_1990 %>%
+  rename(
+    ind_ag = E4P001,
+    ind_mining = E4P002,
+    ind_construction = E4P003,
+    ind_mfg_nondurable = E4P004,
+    ind_mfg_durable = E4P005,
+    ind_transportation = E4P006,
+    ind_utilities = E4P007,
+    ind_wholesale = E4P008,
+    ind_retail = E4P009,
+    ind_fire = E4P010,              # Finance, Insurance, Real Estate
+    ind_business_repair = E4P011,
+    ind_personal_services = E4P012,
+    ind_entertainment = E4P013,
+    ind_health = E4P014,
+    ind_education = E4P015,
+    ind_other_professional = E4P016,
+    ind_public_admin = E4P017,
 
-Aggregate individual IPUMS observations to county-year
-records using the weights and definitions from the
-original LaneMiles_Workbook.Rmd.
-
-```{r aggregate-county}
-st_ipums_ct <- st_ipums %>%
-  group_by(FIPS, YEAR) %>%
-  filter(
-    HHINCOME < 999999,
-    !is.na(HHINCOME)
-  ) %>%
-  summarise(
-    avg_hh_income = weighted.mean(HHINCOME, HHWT),
-    s_emp = weighted.mean(emp, PERWT),
-    s_poverty = weighted.mean(poverty_s, PERWT),
-    d_poverty = weighted.mean(poverty_d, PERWT),
-    educ = weighted.mean(educ, PERWT),
-    auto = weighted.mean(auto, HHWT),
-    auto_n = sum(auto * HHWT),
-    s_manuf = weighted.mean(manuf, PERWT),
-    .groups = "drop"
+    veh_none = EYQ001,
+    veh_1plus = EYQ002
   )
 
-cat("County-year records:", nrow(st_ipums_ct), "\n")
+ 
+#renaming the 2000 industry by sex names 
 
-head(st_ipums_ct, 10)
-```
+NHGIS_2000 <- NHGIS_2000 %>%
+  rename(
+    ind_m_ag_mining = GMH001,
+    ind_m_construction = GMH002,
+    ind_m_manufacturing = GMH003,
+    ind_m_wholesale = GMH004,
+    ind_m_retail = GMH005,
+    ind_m_transport_utilities = GMH006,
+    ind_m_information = GMH007,
+    ind_m_fire = GMH008,
+    ind_m_professional = GMH009,
+    ind_m_ed_health_social = GMH010,
+    ind_m_arts_food = GMH011,
+    ind_m_other_services = GMH012,
+    ind_m_public_admin = GMH013,
 
-## 9. Validate County-Level Output
-
-```{r validate-county}
-# 1. Check record count
-cat("Total records:", nrow(st_ipums_ct), "\n")
-
-# 2. Check unique county-year combinations
-duplicates <- st_ipums_ct %>%
-  count(FIPS, YEAR) %>%
-  filter(n > 1)
-
-cat("Duplicate county-years:", nrow(duplicates), "\n")
-
-# 3. Check missing values
-missing_summary <- st_ipums_ct %>%
-  summarise(
-    across(
-      everything(),
-      ~ sum(is.na(.x))
-    )
+    ind_f_ag_mining = GMH014,
+    ind_f_construction = GMH015,
+    ind_f_manufacturing = GMH016,
+    ind_f_wholesale = GMH017,
+    ind_f_retail = GMH018,
+    ind_f_transport_utilities = GMH019,
+    ind_f_information = GMH020,
+    ind_f_fire = GMH021,
+    ind_f_professional = GMH022,
+    ind_f_ed_health_social = GMH023,
+    ind_f_arts_food = GMH024,
+    ind_f_other_services = GMH025,
+    ind_f_public_admin = GMH026
   )
 
-print(missing_summary, width = Inf)
 
-# 4. Check unidentified counties
-unidentified <- st_ipums_ct %>%
-  filter(is.na(FIPS) | FIPS %% 1000 == 0)
 
-cat("Unidentified county-year records:",
-    nrow(unidentified), "\n")
 
-# 5. Check year coverage
-st_ipums_ct %>%
-  count(YEAR) %>%
-  print(n = Inf)
-
-# 6. Inspect variable distributions
-summary(st_ipums_ct)
 ```
 
-## 10. Export County-Level IPUMS Dataset
+## 3. Reformatting TS dataset 
+```{r}
+## some of the years variables are ranges as they come from the 5 year ACS 
+## these need to be aligned with the years they represent. However some data did
+## come from the 2010 and 2020 census and have those years.  Thereofre I need to 
+## make 2 new DF, one for ACS data, one for 2010 and 2020 census data, join those
+## then re append them to the 1980-2000 data
+
+##Further the YEAR variable is now a character and will need to be converted to 
+## an int for when it is merged with both other NHGIS data and with the HPMS data
+
+# first recover the distinct years 
+years <- NHGIS_TS %>% 
+  distinct(YEAR)
+years
+
+## now make dataset of ACS data, Census data, and trim off these data from the TS
+## also turn the years into an integer 
+
+ACS_2010_2020 <- NHGIS_TS %>% 
+  filter(YEAR=="2011-2015" | YEAR=="2020-2024") %>%
+  select(where(~ !all(is.na(.)))) %>%
+  mutate(YEAR=case_when(YEAR=="2011-2015" ~ "2010",
+                   YEAR=="2020-2024" ~ "2020",
+                   TRUE ~ YEAR),
+         YEAR=as.integer(YEAR))
+
+DEC_2010_2020 <-NHGIS_TS %>%
+  filter(YEAR=="2010" | YEAR=="2020") %>%
+  select(where(~ !all(is.na(.)))) %>%
+  mutate(YEAR=as.integer(YEAR))
+
+NHGIS_TS <- NHGIS_TS %>% 
+  filter(YEAR=="1980" | YEAR=="1990" | YEAR=="2000") %>%
+  mutate(YEAR=as.integer(YEAR))
+  
+
+## now join the 2010-2020 datasets
+
+
+
+NHGIS_2010_2020 <- DEC_2010_2020 %>%
+  left_join(
+    ACS_2010_2020 %>%
+      select(
+        FIPS,
+        YEAR,
+        all_of(setdiff(names(ACS_2010_2020), names(DEC_2010_2020)))
+      ),
+    by = c("FIPS", "YEAR")
+  )
+
+ 
+
+## and re append the last 2 decades to the bottom 
+
+NHGIS_TS <- bind_rows(NHGIS_TS, NHGIS_2010_2020)
+
+## drop the temporary data sets
+#rm(NHGIS_2010_2020, ACS_2010_2020, DEC_2010_2020)
+
+
+stopifnot(is.integer(NHGIS_TS$YEAR))
+
+ 
+
+```
+## 4. Create new variables and select down to columns to merge on
+
+```{r}
+## There are two consistently non time series columns, industry and vehicles
+## for each county we want the share of manufacturing in LF  
+## each year handles these data a little differently, we need to adjust.
+
+## 1980 
+# Sum all employment, sum manufacturing, divide manufacturing by all employment
+
+NHGIS_1980_merge <- NHGIS_1980 %>%
+  mutate(emp_total = rowSums(select(., starts_with("ind_")), na.rm = TRUE),
+         emp_mfg = rowSums(select(., starts_with("ind_mfg")),na.rm = TRUE), 
+        share_man= emp_mfg/emp_total,
+        FIPS = STATEA*1000+COUNTYA) %>%
+  select(YEAR, share_man, emp_total, emp_mfg, FIPS)
+
+## 1990
+# Sum all employment, sum manufacturing, divide manufacturing by all employment
+
+NHGIS_1990_merge <-NHGIS_1990 %>%
+  mutate(emp_total = rowSums(select(., starts_with("ind_")), na.rm = TRUE),
+         emp_mfg = rowSums(select(., starts_with("ind_mfg")),na.rm = TRUE), 
+        share_man= emp_mfg/emp_total, 
+        FIPS = STATEA*1000+COUNTYA) %>%
+  select(YEAR, share_man, emp_total, emp_mfg, FIPS)
+
+
+## 2000 
+# Sum all employment, sum manufacturing, divide manufacturing by all employment
+# this year is split by gender so we will also need to make sure to include both
+
+
+NHGIS_2000_merge <-NHGIS_2000 %>%
+  mutate(emp_total = rowSums(select(., starts_with("ind_")), na.rm = TRUE),
+         emp_mfg = rowSums(select(., ends_with("manufacturing")),na.rm = TRUE), 
+        share_man= emp_mfg/emp_total,
+        FIPS = STATEA*1000+COUNTYA) %>%
+  select(YEAR, share_man, emp_total, emp_mfg, FIPS)
+
+
+## 2010
+# emp_total already exists, just need to divide
+
+NHGIS_2010_merge <-NHGIS_2010 %>%
+  rename(emp_total = Total..Estimate..Civilian.employed.population.16.years.and.over,
+         emp_mfg = Total..Estimate..Manufacturing) %>%
+  mutate(share_man= emp_mfg/emp_total,
+        YEAR = 2010 ) %>%
+  select(FIPS, share_man, emp_mfg, emp_total, YEAR)
+
+ 
+
+## 2020
+
+NHGIS_2020_merge <-NHGIS_2020 %>%
+  rename(emp_total = Estimate..Total..Civilian.employed.population.16.years.and.over,
+         emp_mfg = Estimate..Total..Civilian.employed.population.16.years.and.over..Manufacturing) %>%
+  mutate(share_man= emp_mfg/emp_total,
+        FIPS = substr(Geography, nchar(Geography) - 4, nchar(Geography)), ## pulls FIPS out of geography
+        FIPS = as.integer(FIPS),
+        YEAR = 2020) %>%
+  select(FIPS, share_man, emp_mfg, emp_total, YEAR)
+
+#bind them all together
+
+Emp_TS <- bind_rows(NHGIS_1980_merge, NHGIS_1990_merge, NHGIS_2000_merge, NHGIS_2010_merge, NHGIS_2020_merge)
+
+
+```
+
+
+
+## 5. Combine the CSV into one  
+
+```{r}
+
+NHGIS_Data <- NHGIS_TS %>%
+  left_join(Emp_TS, by = c("FIPS", "YEAR"))
+
+ 
+
+```
+
+## 6. Export County-Level IPUMS Dataset
 
 Save the processed dataset to the configured output
 directory and verify the exported file.
@@ -290,7 +417,7 @@ output_file <- file.path(
 
 # Write CSV
 write.csv(
-  st_ipums_ct,
+  NHGIS_Data,
   output_file,
   row.names = FALSE
 )
@@ -302,11 +429,19 @@ exported_data <- read.csv(output_file)
 
 # Verify dimensions and column names
 stopifnot(
-  nrow(exported_data) == nrow(st_ipums_ct),
-  identical(names(exported_data), names(st_ipums_ct))
+  nrow(exported_data) == nrow(NHGIS_Data),
+  identical(names(exported_data), names(NHGIS_Data))
 )
 
 cat("Export verification passed.\n")
 cat("Rows:", nrow(exported_data), "\n")
 cat("Columns:", ncol(exported_data), "\n")
+
+#clean up the memory
+rm(list = ls())
+
 ```
+
+
+
+
