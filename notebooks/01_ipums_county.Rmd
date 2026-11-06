@@ -412,7 +412,7 @@ dir.create(
 # Construct output file path
 output_file <- file.path(
   cfg$paths$output_dir,
-  cfg$ipums$output_file
+  cfg$nhgis$output_file
 )
 
 # Write CSV

@@ -4,26 +4,476 @@ output: html_document
 date: "2026-11-05"
 ---
 
-```{r setup, include=FALSE}
+
+## 1. Setup
+
+This notebook prepares county-level HPMS data including lane miles and vmt
+
+```{r setup}
 knitr::opts_chunk$set(echo = TRUE)
+
+
+library("dplyr") # data cleaning and handling
+library("modelsummary") # outputing results where needed
+library("sf") # handles shapefiles
+library("units") # converts units of messure 
+
+# Load project configuration
+source(here::here("R", "load_config.R"))
+cfg <- load_config()
+
+# Define HPMS input 
+
+HPMS_dir <- file.path(
+  cfg$paths$input_dir,
+  cfg$hpms$data_dir_HPMS
+)
+
+stopifnot(dir.exists(HPMS_dir))
 ```
 
-## R Markdown
+## Import HPMS data for 1980 and clean the data saving as CSV
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r}
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+subdir_1983 <- file.path(HPMS_dir, "1983")
+files_1983 <- list.files(
+  path = subdir_1983,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
 
-```{r cars}
-summary(cars)
+files_1983
+
+hpms_83_uni <- read.csv(files_1983[[1]])
+
+hpms_83_sample <- read.csv(files_1983[[2]])
+
+#taking only what we need from 1983 sample.  The sample is a perfect subset of the 
+# universal data, and many variables are repeated so no reason to just merge them all
+# for 1983 specifically the f_system does not exist and must be reconstructed from 
+# the functional class variable.  Also calculating the percent commercial vehicles 
+# by averaging the peak and off peak trucks since no breakdown into single or
+# combination trucks are available 
+hpms_83_sample_for_merge <-hpms_83_sample %>% 
+  mutate( Section.Identification = SECTION.IDENTIFICATION,
+         f_system = case_when(FUNCTIONAL.CLASS==1 | FUNCTIONAL.CLASS==11 ~ 1,
+                              FUNCTIONAL.CLASS==2 | FUNCTIONAL.CLASS==12 ~ 2,
+                              FUNCTIONAL.CLASS==6 | FUNCTIONAL.CLASS==14 ~ 3,
+                              FUNCTIONAL.CLASS==7 | FUNCTIONAL.CLASS==16 ~ 4,
+                              FUNCTIONAL.CLASS==8 | FUNCTIONAL.CLASS==17 ~ 5,
+                              FUNCTIONAL.CLASS==9 | FUNCTIONAL.CLASS==19 ~ 6),
+         avg_truck = rowMeans(pick(PEAK.PERCENT.TRUCKS,OFF.PEAK.PERCENT.TRUCKS), na.rm=TRUE) ) %>%
+  select(Section.Identification, EXPANSION.FACTOR, PEAK.PERCENT.TRUCKS, OFF.PEAK.PERCENT.TRUCKS, FUNCTIONAL.CLASS, f_system, avg_truck)
+
+ 
+# combine into final 1983 data
+hpms_83 <- merge(hpms_83_uni, hpms_83_sample_for_merge, by="Section.Identification")
+
+## create a new dataset to filter and mutate 
+## preferred variables are those with Expansion factor but calculating the 
+## non-expansion factor as well to run a robustness check as complex survey 
+## designs (in this case stratified random samples) can have unpredictable 
+## impacts on the SE in the analysis. 
+
+selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+
+hpms_83_st <- hpms_83 %>%
+  filter(State.FIPS.Code %in% selected_states) %>%
+  mutate(state = State.FIPS.Code, county = County.FIPS.Code, 
+         lane_miles = Number.of.Through.Lanes* Section.Grouped.Length,
+         lane_miles_expand = Number.of.Through.Lanes* Section.Grouped.Length*EXPANSION.FACTOR,
+         Perc_com = avg_truck,
+         AADT_com = AADT * Perc_com/100,
+         vmt = AADT*Section.Grouped.Length,
+         vmt_expand = AADT*Section.Grouped.Length*EXPANSION.FACTOR,
+         vmt_com = AADT_com * Section.Grouped.Length,
+         vmt_com_expand = vmt_com*EXPANSION.FACTOR,
+         vmt_urban = if_else(Rural.Urban!=1, vmt, 0),
+         vmt_rural = if_else(Rural.Urban==1, vmt, 0),
+         vmt_urban_expand = if_else(Rural.Urban!=1, vmt_expand, 0),
+         vmt_rural_expand = if_else(Rural.Urban==1, vmt_expand,0),
+         vmt_urban_com_ex = if_else(Rural.Urban!=1, vmt_com_expand, 0),
+         vmt_rural_com_ex = if_else(Rural.Urban==1, vmt_com_expand, 0),
+         year = 1983)      
+
+## collapse to the county
+
+hpms_83_st_ct <- hpms_83_st %>%
+  group_by(state, county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(Section.Grouped.Length),
+            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
+            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
+            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
+            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
+            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+
+## drop the dataframes we do not want
+ 
+rm(hpms_83, hpms_83_st, hpms_83_uni, hpms_83_sample, hpms_83_sample_for_merge)
+
+
+
+```
+## Cleaning the 1993 data
+
+```{r}
+
+subdir_1993 <- file.path(HPMS_dir, "1993")
+files_1993 <- list.files(
+  path = subdir_1993,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+files_1993
+
+ 
+
+
+hpms_93_uni <- read.csv(files_1993[[2]])
+
+hpms_93_sample <- read.csv(files_1993[[1]])
+
+#taking only what we need from 1993 sample.  The sample is a perfect subset of the 
+# universal data, and many variables are repeated so no reason to just merge them all
+hpms_93_sample_for_merge <-hpms_93_sample %>% 
+  select(SECTION.ID, STANDARD.EXPANSION.FACTOR, COMB.COMM.VEH.AVERAGE, SINGLE.UNIT.VEH.AVERAGE)
+
+ 
+# combine into final 2003 data
+hpms_93 <- merge(hpms_93_uni, hpms_93_sample_for_merge, by="SECTION.ID")
+
+## create a new dataset to filter and mutate 
+## preferred variables are those with Expansion factor but calculating the 
+## non-expansion factor as well to run a robustness check as complex survey 
+## designs (in this case stratified random samples) can have unpredictable 
+## impacts on the SE in the analysis. 
+
+hpms_93_st <- hpms_93 %>%
+  filter(STATE %in% selected_states) %>%
+  mutate(state = STATE, county = COUNTY, f_system = GEN.FUNCTIONAL.SYSTEM,
+         lane_miles = NUMBER.OF.LANES*SECTION.LENGTH,
+         lane_miles_expand = NUMBER.OF.LANES*SECTION.LENGTH*STANDARD.EXPANSION.FACTOR,
+         Perc_com = SINGLE.UNIT.VEH.AVERAGE+COMB.COMM.VEH.AVERAGE,
+         AADT_com = AADT * Perc_com/100,
+         vmt = AADT*SECTION.LENGTH,
+         vmt_expand = AADT*SECTION.LENGTH*STANDARD.EXPANSION.FACTOR,
+         vmt_com = AADT_com * SECTION.LENGTH,
+         vmt_com_expand = vmt_com*STANDARD.EXPANSION.FACTOR,
+         vmt_urban = if_else(RURAL.URBAN!=1, vmt, 0),
+         vmt_rural = if_else(RURAL.URBAN==1, vmt, 0),
+         vmt_urban_expand = if_else(RURAL.URBAN!=1, vmt_expand, 0),
+         vmt_rural_expand = if_else(RURAL.URBAN==1, vmt_expand,0),
+         vmt_urban_com_ex = if_else(RURAL.URBAN!=1, vmt_com_expand, 0),
+         vmt_rural_com_ex = if_else(RURAL.URBAN==1, vmt_com_expand, 0),
+         year = 1993)      
+ 
+
+hpms_93_st_ct <- hpms_93_st %>%
+  group_by(state, county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(SECTION.LENGTH),
+            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
+            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
+            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
+            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
+            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+
+rm(hpms_93, hpms_93_st, hpms_93_sample_for_merge, hpms_93_sample, hpms_93_uni)
+
+```
+## 2003 HPMS data
+
+```{r}
+
+subdir_2003 <- file.path(HPMS_dir, "2003")
+files_2003 <- list.files(
+  path = subdir_2003,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+files_2003
+
+hpms_03_uni <- read.csv(files_2003[[2]])
+
+hpms_03_sample <- read.csv(files_2003[[1]])
+
+hpms_03_sample_for_merge <-hpms_03_sample %>% select(SECTION_ID, STD_EXP_FACTOR, PERC_COMBINATION, PERC_SINGLE_UNIT)
+
+# rename merging ID
+names(hpms_03_sample_for_merge)[names(hpms_03_sample_for_merge) == 'SECTION_ID'] <- 'Section_ID'
+
+# combine into final 2003 data
+hpms_03 <- merge(hpms_03_uni, hpms_03_sample_for_merge, by="Section_ID")
+
+## create a new dataset to filter and mutate 
+hpms_03_st <- hpms_03 %>%
+  filter(State_Code %in% selected_states) %>%
+  mutate(state = State_Code, county = County_Code, f_system = GF_System,
+         lane_miles = Through_Lanes*Section__Length,
+         lane_miles_expand = STD_EXP_FACTOR*Through_Lanes*Section__Length,
+         Perc_com = PERC_COMBINATION+PERC_SINGLE_UNIT,
+         AADT_com = AADT * Perc_com/100,
+         vmt = AADT*Section__Length,
+         vmt_expand = AADT*Section__Length*STD_EXP_FACTOR,
+         vmt_com = AADT_com * Section__Length,
+         vmt_com_expand = vmt_com*STD_EXP_FACTOR,
+         vmt_urban = if_else(Rural.Urban!=1, vmt, 0),
+         vmt_rural = if_else(Rural.Urban==1, vmt, 0),
+         vmt_urban_expand = if_else(Rural.Urban!=1, vmt_expand, 0),
+         vmt_rural_expand = if_else(Rural.Urban==1, vmt_expand,0),
+         vmt_urban_com_ex = if_else(Rural.Urban!=1, vmt_com_expand, 0),
+         vmt_rural_com_ex = if_else(Rural.Urban==1, vmt_com_expand, 0),
+         year = 2003)        
+ 
+
+hpms_03_st_ct <- hpms_03_st %>%
+  group_by(state, county, f_system, year) %>%
+  summarise(vmt = sum(vmt), miles = sum(Section__Length), 
+            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
+            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
+            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
+            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
+            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+
+rm(hpms_03_st, hpms_03, hpms_03_sample_for_merge, hpms_03_sample, hpms_03_uni )
+
+```
+## 2013 
+
+```{r}
+
+subdir_2013 <- file.path(HPMS_dir, "2013")
+
+ 
+
+file_list_2013 <- list.files(path = subdir_2013, pattern = "*shp", full.names = TRUE)
+
+shapefile_2013_list <- lapply(file_list_2013, read_sf)
+hpms_13 <- sf::st_as_sf(data.table::rbindlist(shapefile_2013_list,  fill=TRUE))
+ 
+
+# all states
+hpms_st13 <- hpms_13 %>%
+  mutate(COUNTY_ID = county_cod, URBAN_ID = urban_code ) %>%
+  filter(!is.na(URBAN_ID),!is.na(aadt_vn), !is.na(through_la)) %>%
+  filter_out(facility_t==7)  
+ 
+
+hpms_st13$length_m <- st_length(hpms_st13)
+
+hpms_st13$length_miles <- set_units(hpms_st13$length_m, "mi")
+
+hpms_st13 <- hpms_st13 %>% mutate(is_sample = ifelse(is.na(is_sample), 0, is_sample))
+
+hpms_st13 <- hpms_st13 %>%
+  mutate(miles = end_point - begin_poin,
+         THROUGH_LANES = as.numeric(through_la),
+         lane_miles = miles * THROUGH_LANES,
+         lane_miles_expand = if_else(!is.na(expansion_), miles * THROUGH_LANES * expansion_, miles*THROUGH_LANES),
+         vmt = aadt_vn*miles, 
+         vmt_expand = if_else(!is.na(expansion_), aadt_vn*miles*expansion_, aadt_vn*miles),
+         lane_miles_urban = if_else(urban_code!=99999, lane_miles, 0), 
+         lane_miles_rural = if_else(urban_code==99999, lane_miles, 0),
+         lane_miles_urban_expand = if_else(urban_code!=99999 , lane_miles_expand, 0), 
+         lane_miles_rural_expand = if_else(urban_code==99999, lane_miles_expand, 0),
+         vmt_urban = if_else(urban_code!=99999, vmt, 0),
+         vmt_rural = if_else(urban_code==99999, vmt, 0),
+         vmt_urban_expand = if_else(urban_code!=99999, vmt_expand, 0),
+         vmt_rural_expand = if_else(urban_code==99999, vmt_expand, 0),
+         RouteID = id, 
+         AADT = aadt_vn,
+         f_system = f_system_v, 
+         county = county_cod, 
+         state=state_code) 
+    
+ 
+hpms_13_st_ct <- hpms_st13 %>%
+  filter(!f_system == "NULL") %>%
+  mutate(year = 2013) %>%
+  group_by(state, county, f_system, year) %>%
+  summarise(vmt = sum(vmt, na.rm = TRUE), vmt_urban = sum(vmt_urban, na.rm=TRUE), vmt_rural = sum(vmt_rural, na.rm=TRUE), 
+            miles = sum(miles, na.rm = TRUE), lane_miles = sum(lane_miles, na.rm = TRUE), lane_miles_expand = sum(lane_miles_expand), 
+            lane_miles_urban = sum(lane_miles_urban, na.rm=TRUE), lane_miles_rural=sum(lane_miles_rural, na.rm=TRUE))
+
+hpms_13_st_ct <- as.data.frame(hpms_13_st_ct) %>% select(-geometry)
+
+rm(hpms_st13, hpms_13)
+
+```
+## 2023 data 
+```{r}
+
+subdir_2023 <- file.path(HPMS_dir, "2023")
+
+## have to hand-code the 2023 year data, the file names do not match with the state codes
+## or even have a consistent pattern that could be wildcard searched
+
+hpms_23_ca <- st_read(file.path(subdir_2023, "a00000011.gdbtable"))
+
+hpms_23_nm <- st_read(file.path(subdir_2023, "a00000026.gdbtable"))
+
+hpms_23_nv <- st_read(file.path(subdir_2023, "a00000034.gdbtable"))
+
+hpms_23_az <- st_read(file.path(subdir_2023, "a00000038.gdbtable"))
+
+hpms_23_id <- st_read(file.path(subdir_2023, "a00000039.gdbtable"))
+
+hpms_23_ut <- st_read(file.path(subdir_2023, "a0000002b.gdbtable"))
+
+hpms_23_wa <- st_read(file.path(subdir_2023, "a0000002c.gdbtable"))
+
+hpms_23_or <- st_read(file.path(subdir_2023, "a0000002e.gdbtable"))
+
+feilds <-c("F_SYSTEM" = "Field6", "FACILITY_TYPE"="Field7", "URBAN_ID"="Field8", "COUNTY_ID"= "Field14", "OWNERSHIP"="Field15" )
+
+hpms_23_nm <- rename(hpms_23_nm, feilds)
+
+list_23 <- list(hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms_23_wa, hpms_23_ut, hpms_23_id)
+
+hpms_23 <- sf::st_as_sf(data.table::rbindlist(list_23,  fill=TRUE, ignore.attr=TRUE))
+
+#converting the NULLS to NA 
+hpms_23 <- hpms_23 %>% mutate(IS_SAMPLE = ifelse(IS_SAMPLE=="NULL", 0, IS_SAMPLE),
+                              F_SYSTEM = ifelse(F_SYSTEM=="NULL", NA, F_SYSTEM),
+                              COUNTY_ID = ifelse(COUNTY_ID=="NULL", NA, COUNTY_ID),
+                              URBAN_ID = ifelse(URBAN_ID=="NULL", NA, URBAN_ID),
+                              AADT = ifelse(AADT=="NULL", NA, AADT),
+                              FACILITY_TYPE = ifelse(FACILITY_TYPE=="NULL", NA, FACILITY_TYPE),
+                              THROUGH_LANES = ifelse(THROUGH_LANES=="NULL", NA, THROUGH_LANES),
+                              AADT_COMBINATION = ifelse(AADT_COMBINATION=="NULL", NA, AADT_COMBINATION),
+                              AADT_SINGLE_UNIT = ifelse(AADT_SINGLE_UNIT=="NULL", NA, AADT_SINGLE_UNIT))
+
+#filtering out the NA's
+hpms_st23 <- hpms_23 %>%
+  mutate(COUNTY_ID = as.numeric(COUNTY_ID)) %>%
+  filter(!is.na(URBAN_ID),
+         !is.na(AADT),
+         !is.na(F_SYSTEM),
+         !is.na(AADT_SINGLE_UNIT),
+         !is.na(AADT_COMBINATION),
+         FACILITY_TYPE!=7) 
+ 
+
+#https://www.fhwa.dot.gov/policyinformation/hpms/softwareguide/hpms_software_guide.pdf
+# in the above document they specify that lane miles are (end point - begin point) * through-lanes
+# the calculation via st_length runs into problems since there are curved segments
+
+# hpms_st23$length_m <- st_length(hpms_st23)
+# hpms_st23$length_miles <- set_units(hpms_st23$length_m, "mi")
+
+#creating the data for actual use and select down to 
+hpms_st23 <- hpms_st23 %>%
+  mutate(miles = EndPoint - BeginPoint,
+         through_la = as.numeric(THROUGH_LANES),
+         lane_miles = miles * through_la,
+         AADT = as.numeric(AADT),
+         AADT_SINGLE_UNIT = as.numeric(AADT_SINGLE_UNIT),
+         AADT_COMBINATION = as.numeric(AADT_COMBINATION),
+         AADT_com = AADT_COMBINATION+AADT_SINGLE_UNIT,
+         lane_miles_urban = if_else(URBAN_ID!=99999, lane_miles, 0),
+         lane_miles_rural = if_else(URBAN_ID==99999, lane_miles,0),
+         AADT_urban = if_else(URBAN_ID!=99999, AADT, 0),
+         AADT_rural = if_else(URBAN_ID==99999, AADT, 0),
+         AADT_com_urban = if_else(URBAN_ID!=99999, AADT_com, 0),
+         AADT_com_rural = if_else(URBAN_ID==99999, AADT_com, 0)) %>%
+  select(RouteID, StateID, COUNTY_ID, URBAN_ID, AADT, miles,
+         lane_miles, F_SYSTEM, Shape_Length, through_la, 
+         AADT_urban, AADT_rural, lane_miles_urban, lane_miles_rural,
+         AADT_com, AADT_com_urban, AADT_com_rural)
+
+hpms_st23 <- hpms_st23 %>%
+  st_drop_geometry()  
+
+ 
+# hpms_st23 <- hpms_st23 %>% filter(!is.na(through_la))
+# hpms_st23 <- hpms_st23 %>% filter(!is.na(f_system)) 
+
+
+hpms_st23 <- as.data.frame(hpms_st23)
+
+hpms_23_st_ct <- hpms_st23 %>%
+  filter(!is.na(COUNTY_ID)) %>%
+  mutate(year = 2023,
+         county = COUNTY_ID,
+         state = StateID,
+         vmt = as.numeric(AADT) * miles,
+         vmt_urban = AADT_urban * miles,
+         vmt_rural = AADT_rural * miles,
+         vmt_com = AADT_com * miles,
+         vmt_com_urb = AADT_com_urban * miles,
+         vmt_com_rul = AADT_com_rural * miles,
+         f_system = as.numeric(F_SYSTEM)) %>%
+  group_by(state, county, f_system, year) %>%
+  summarise(vmt = sum(vmt, na.rm = TRUE), vmt_urban = sum(vmt_urban, na.rm=TRUE), vmt_rural = sum(vmt_rural, na.rm=TRUE), 
+            miles = sum(miles, na.rm = TRUE), lane_miles = sum(lane_miles, na.rm = TRUE),
+            lane_miles_urban = sum(lane_miles_urban, na.rm=TRUE), lane_miles_rural=sum(lane_miles_rural, na.rm=TRUE))
+
+
+rm(list_23, hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms_23_wa, hpms_23_ut, hpms_23_id, feilds, hpms_23)
+
 ```
 
-## Including Plots
 
-You can also embed plots, for example:
+## Merge the county data files together
+```{r, results = FALSE, warning=FALSE}
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+hpms_st_ct <- bind_rows(hpms_83_st_ct, hpms_93_st_ct, hpms_03_st_ct, hpms_13_st_ct, hpms_23_st_ct)
+
+
+
+
+
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+
+## Export CSV
+
+```{r}
+
+# Create output directory if it does not exist
+dir.create(
+  cfg$paths$output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Construct output file path
+output_file <- file.path(
+  cfg$paths$output_dir,
+  cfg$hpms$output_file
+)
+
+# Write CSV
+write.csv(
+  hpms_st_ct,
+  output_file,
+  row.names = FALSE
+)
+
+cat("Dataset saved to:", output_file, "\n")
+
+# Read the CSV back for verification
+exported_data <- read.csv(output_file)
+
+# Verify dimensions and column names
+stopifnot(
+  nrow(exported_data) == nrow(hpms_st_ct),
+  identical(names(exported_data), names(hpms_st_ct))
+)
+
+cat("Export verification passed.\n")
+cat("Rows:", nrow(exported_data), "\n")
+cat("Columns:", ncol(exported_data), "\n")
+
+#clean up the memory
+rm(list = ls())
+
+ 
+
+
+```
+
