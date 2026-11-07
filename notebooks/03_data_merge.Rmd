@@ -1,0 +1,147 @@
+---
+title: "Merging_data"
+output: html_document
+date: "2026-11-06"
+---
+## 1. Setup
+
+This notebook takes in historic RR, HPMS, and NHGIS data and merges it into a
+final csv to run the anylisis from.  
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library("dplyr") # data cleaning and handling
+library("modelsummary") # outputting results where needed
+ 
+# Load project configuration
+source(here::here("R", "load_config.R"))
+cfg <- load_config()
+
+# Define Railroad input 
+
+RR_dir <- file.path(
+  cfg$paths$input_dir,
+  cfg$RR$data_dir_RR
+)
+
+## defining the processed data as an input path as well
+
+# Construct output file path
+merge_files <- file.path(
+  cfg$paths$output_dir
+)
+
+selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+
+stopifnot(dir.exists(RR_dir))
+stopifnot(dir.exists(merge_files))
+
+```
+
+## 2. Load historic RR data
+
+```{r}
+
+# subdir_RR <- file.path(input_dir, "Source_Data/Railroads")
+
+
+historic_railroads <- read.csv(file.path(RR_dir, "historical_railroad_county_summary_10232026.csv"))
+
+historic_railroads <- historic_railroads %>%
+  rename(FIPS = GEOID,
+         Sum_RR_miles = SUM_geodesic_miles) %>%
+  filter(STATEFP %in% selected_states) 
+
+```
+
+
+## load the NHGIS and HPMS data and merge them then merge m:1 RR data
+
+```{r}
+
+NHGIS <- read.csv(file.path(merge_files, "NHGIS_ct.csv"))
+
+NHGIS <- NHGIS %>%
+  mutate(year = year+3)
+
+HPMS <- read.csv(file.path(merge_files, "HPMS_ct.csv"))
+
+Final_ct_data <- NHGIS %>%
+  left_join(HPMS, by = c("FIPS", "year")) 
+
+
+Final_ct_data <- Final_ct_data %>%
+  left_join(historic_railroads, by= "FIPS", relationship = "many-to-one"  )
+  
+ 
+
+
+```
+
+## create the shift share devise
+
+```{r}
+## Shift share is a technique designed to introduce a time varying IV estimator
+## in this case it is the time constant share is are the miles of historic RR
+## the shift is the proportion of final miles of highway completed each year
+
+## calculate the proportion of final highway
+## note this is based on lane miles of major highways only as that is the only
+## fully reported lane miles in all data-sets so there is no variation introduced
+## via sampling. 
+
+Final_ct_data <- Final_ct_data %>%
+  group_by(FIPS) %>%
+  mutate(
+    lane_miles_ih = lane_miles_rur_ih+lane_miles_urb_ih,
+    lane_miles_ih_max = max(lane_miles_ih, na.rm=TRUE)) %>%
+  ungroup() %>%
+  mutate(shift_share = Sum_RR_miles*lane_miles_ih/lane_miles_ih_max)
+
+```
+
+
+
+## exporting the final csv
+```{r}
+# Create output directory if it does not exist
+dir.create(
+  cfg$paths$output_dir,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+ 
+# Construct output file path
+output_file <- file.path(
+  cfg$paths$output_dir,
+  cfg$merge$output_file
+)
+
+# Write CSV
+write.csv(
+  Final_ct_data,
+  output_file,
+  row.names = FALSE
+)
+
+cat("Dataset saved to:", output_file, "\n")
+
+# Read the CSV back for verification
+exported_data <- read.csv(output_file)
+
+# Verify dimensions and column names
+stopifnot(
+  nrow(exported_data) == nrow(Final_ct_data),
+  identical(names(exported_data), names(Final_ct_data))
+)
+
+cat("Export verification passed.\n")
+cat("Rows:", nrow(exported_data), "\n")
+cat("Columns:", ncol(exported_data), "\n")
+
+#clean up the memory
+#rm(list = ls())
+```
+

@@ -29,6 +29,8 @@ HPMS_dir <- file.path(
   cfg$hpms$data_dir_HPMS
 )
 
+selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+
 stopifnot(dir.exists(HPMS_dir))
 ```
 
@@ -76,37 +78,68 @@ hpms_83 <- merge(hpms_83_uni, hpms_83_sample_for_merge, by="Section.Identificati
 ## designs (in this case stratified random samples) can have unpredictable 
 ## impacts on the SE in the analysis. 
 
-selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+measure_vars <- c(
+  "lane_miles",
+  "lane_miles_exp",
+  "vmt",
+  "vmt_exp",
+  "vmt_com",
+  "vmt_com_exp"
+)
 
-hpms_83_st <- hpms_83 %>%
+hpms_83_st<- hpms_83 %>%
   filter(State.FIPS.Code %in% selected_states) %>%
-  mutate(state = State.FIPS.Code, county = County.FIPS.Code, 
-         lane_miles = Number.of.Through.Lanes* Section.Grouped.Length,
-         lane_miles_expand = Number.of.Through.Lanes* Section.Grouped.Length*EXPANSION.FACTOR,
-         Perc_com = avg_truck,
-         AADT_com = AADT * Perc_com/100,
-         vmt = AADT*Section.Grouped.Length,
-         vmt_expand = AADT*Section.Grouped.Length*EXPANSION.FACTOR,
-         vmt_com = AADT_com * Section.Grouped.Length,
-         vmt_com_expand = vmt_com*EXPANSION.FACTOR,
-         vmt_urban = if_else(Rural.Urban!=1, vmt, 0),
-         vmt_rural = if_else(Rural.Urban==1, vmt, 0),
-         vmt_urban_expand = if_else(Rural.Urban!=1, vmt_expand, 0),
-         vmt_rural_expand = if_else(Rural.Urban==1, vmt_expand,0),
-         vmt_urban_com_ex = if_else(Rural.Urban!=1, vmt_com_expand, 0),
-         vmt_rural_com_ex = if_else(Rural.Urban==1, vmt_com_expand, 0),
-         year = 1983)      
+  rename(state = State.FIPS.Code, county = County.FIPS.Code, Perc_com = avg_truck,
+         through_la = Number.of.Through.Lanes, miles = Section.Grouped.Length,
+         expansion_factor=EXPANSION.FACTOR ) %>%
+  mutate(
+    year = 1983,
+    urb = Rural.Urban != 1,
+    ih  = f_system == 1,
+    lane_miles        = through_la*miles,
+    lane_miles_exp = lane_miles * expansion_factor,
+    AADT_com          = AADT * Perc_com / 100,
+    vmt               = AADT * miles,
+    vmt_exp        = vmt * expansion_factor,
+    vmt_com           = AADT_com * miles,
+    vmt_com_exp    = vmt_com * expansion_factor
+  ) %>%
+    mutate(
+    across(
+      all_of(measure_vars),
+      list(
+        urb_ih  = ~ if_else( urb &  ih, ., 0),
+        urb_mur = ~ if_else( urb & !ih, ., 0),
+        rur_ih  = ~ if_else(!urb &  ih, ., 0),
+        rur_mur = ~ if_else(!urb & !ih, ., 0)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
 
 ## collapse to the county
 
+
+sum_vars <- names(hpms_83_st) |>
+  grep(
+    pattern = paste0(
+      "^(",
+      paste(measure_vars, collapse = "|"),
+      ")(_urb_ih|_urb_mur|_rur_ih|_rur_mur)?$"
+    ),
+    value = TRUE
+  )
+ 
+
 hpms_83_st_ct <- hpms_83_st %>%
-  group_by(state, county, f_system, year) %>%
-  summarise(vmt = sum(vmt), miles = sum(Section.Grouped.Length),
-            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
-            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
-            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
-            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
-            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+  group_by(state, county, year) %>%
+  summarise(
+    miles = sum(miles, na.rm = TRUE),
+    across(all_of(measure_vars), ~ sum(.x, na.rm = TRUE)),
+    across(all_of(sum_vars), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
 
 ## drop the dataframes we do not want
  
@@ -150,34 +183,72 @@ hpms_93 <- merge(hpms_93_uni, hpms_93_sample_for_merge, by="SECTION.ID")
 ## designs (in this case stratified random samples) can have unpredictable 
 ## impacts on the SE in the analysis. 
 
-hpms_93_st <- hpms_93 %>%
+ 
+measure_vars <- c(
+  "lane_miles",
+  "lane_miles_exp",
+  "vmt",
+  "vmt_exp",
+  "vmt_com",
+  "vmt_com_exp"
+)
+
+hpms_93_st<- hpms_93 %>%
   filter(STATE %in% selected_states) %>%
-  mutate(state = STATE, county = COUNTY, f_system = GEN.FUNCTIONAL.SYSTEM,
-         lane_miles = NUMBER.OF.LANES*SECTION.LENGTH,
-         lane_miles_expand = NUMBER.OF.LANES*SECTION.LENGTH*STANDARD.EXPANSION.FACTOR,
-         Perc_com = SINGLE.UNIT.VEH.AVERAGE+COMB.COMM.VEH.AVERAGE,
-         AADT_com = AADT * Perc_com/100,
-         vmt = AADT*SECTION.LENGTH,
-         vmt_expand = AADT*SECTION.LENGTH*STANDARD.EXPANSION.FACTOR,
-         vmt_com = AADT_com * SECTION.LENGTH,
-         vmt_com_expand = vmt_com*STANDARD.EXPANSION.FACTOR,
-         vmt_urban = if_else(RURAL.URBAN!=1, vmt, 0),
-         vmt_rural = if_else(RURAL.URBAN==1, vmt, 0),
-         vmt_urban_expand = if_else(RURAL.URBAN!=1, vmt_expand, 0),
-         vmt_rural_expand = if_else(RURAL.URBAN==1, vmt_expand,0),
-         vmt_urban_com_ex = if_else(RURAL.URBAN!=1, vmt_com_expand, 0),
-         vmt_rural_com_ex = if_else(RURAL.URBAN==1, vmt_com_expand, 0),
-         year = 1993)      
+  rename(state = STATE, county = COUNTY, f_system = GEN.FUNCTIONAL.SYSTEM, 
+         through_la = NUMBER.OF.LANES, miles = SECTION.LENGTH,
+         expansion_factor=STANDARD.EXPANSION.FACTOR ) %>%
+  mutate(
+    year = 1993,
+    Perc_com = SINGLE.UNIT.VEH.AVERAGE+COMB.COMM.VEH.AVERAGE,
+    urb = RURAL.URBAN != 1,
+    ih  = f_system == 1,
+    lane_miles        = through_la*miles,
+    lane_miles_exp = lane_miles * expansion_factor,
+    AADT_com          = AADT * Perc_com / 100,
+    vmt               = AADT * miles,
+    vmt_exp        = vmt * expansion_factor,
+    vmt_com           = AADT_com * miles,
+    vmt_com_exp    = vmt_com * expansion_factor
+  ) %>%
+    mutate(
+    across(
+      all_of(measure_vars),
+      list(
+        urb_ih  = ~ if_else( urb &  ih, ., 0),
+        urb_mur = ~ if_else( urb & !ih, ., 0),
+        rur_ih  = ~ if_else(!urb &  ih, ., 0),
+        rur_mur = ~ if_else(!urb & !ih, ., 0)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+
+## collapse to the county
+
+
+sum_vars <- names(hpms_93_st) |>
+  grep(
+    pattern = paste0(
+      "^(",
+      paste(measure_vars, collapse = "|"),
+      ")(_urb_ih|_urb_mur|_rur_ih|_rur_mur)?$"
+    ),
+    value = TRUE
+  )
  
 
 hpms_93_st_ct <- hpms_93_st %>%
-  group_by(state, county, f_system, year) %>%
-  summarise(vmt = sum(vmt), miles = sum(SECTION.LENGTH),
-            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
-            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
-            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
-            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
-            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+  group_by(state, county, year) %>%
+  summarise(
+    miles = sum(miles, na.rm = TRUE),
+    across(all_of(measure_vars), ~ sum(.x, na.rm = TRUE)),
+    across(all_of(sum_vars), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+
 
 rm(hpms_93, hpms_93_st, hpms_93_sample_for_merge, hpms_93_sample, hpms_93_uni)
 
@@ -207,35 +278,71 @@ names(hpms_03_sample_for_merge)[names(hpms_03_sample_for_merge) == 'SECTION_ID']
 # combine into final 2003 data
 hpms_03 <- merge(hpms_03_uni, hpms_03_sample_for_merge, by="Section_ID")
 
-## create a new dataset to filter and mutate 
-hpms_03_st <- hpms_03 %>%
+
+measure_vars <- c(
+  "lane_miles",
+  "lane_miles_exp",
+  "vmt",
+  "vmt_exp",
+  "vmt_com",
+  "vmt_com_exp"
+)
+
+hpms_03_st<- hpms_03 %>%
   filter(State_Code %in% selected_states) %>%
-  mutate(state = State_Code, county = County_Code, f_system = GF_System,
-         lane_miles = Through_Lanes*Section__Length,
-         lane_miles_expand = STD_EXP_FACTOR*Through_Lanes*Section__Length,
-         Perc_com = PERC_COMBINATION+PERC_SINGLE_UNIT,
-         AADT_com = AADT * Perc_com/100,
-         vmt = AADT*Section__Length,
-         vmt_expand = AADT*Section__Length*STD_EXP_FACTOR,
-         vmt_com = AADT_com * Section__Length,
-         vmt_com_expand = vmt_com*STD_EXP_FACTOR,
-         vmt_urban = if_else(Rural.Urban!=1, vmt, 0),
-         vmt_rural = if_else(Rural.Urban==1, vmt, 0),
-         vmt_urban_expand = if_else(Rural.Urban!=1, vmt_expand, 0),
-         vmt_rural_expand = if_else(Rural.Urban==1, vmt_expand,0),
-         vmt_urban_com_ex = if_else(Rural.Urban!=1, vmt_com_expand, 0),
-         vmt_rural_com_ex = if_else(Rural.Urban==1, vmt_com_expand, 0),
-         year = 2003)        
+  rename(state = State_Code, county = County_Code, f_system = GF_System,
+         through_la = Through_Lanes, miles = Section__Length,
+         expansion_factor=STD_EXP_FACTOR ) %>%
+  mutate(
+    year = 2003,
+    Perc_com = PERC_COMBINATION+PERC_SINGLE_UNIT,
+    urb = Rural.Urban != 1,
+    ih  = f_system == 1,
+    lane_miles        = through_la*miles,
+    lane_miles_exp = lane_miles * expansion_factor,
+    AADT_com          = AADT * Perc_com / 100,
+    vmt               = AADT * miles,
+    vmt_exp        = vmt * expansion_factor,
+    vmt_com           = AADT_com * miles,
+    vmt_com_exp    = vmt_com * expansion_factor
+  ) %>%
+    mutate(
+    across(
+      all_of(measure_vars),
+      list(
+        urb_ih  = ~ if_else( urb &  ih, ., 0),
+        urb_mur = ~ if_else( urb & !ih, ., 0),
+        rur_ih  = ~ if_else(!urb &  ih, ., 0),
+        rur_mur = ~ if_else(!urb & !ih, ., 0)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+
+## collapse to the county
+
+
+sum_vars <- names(hpms_03_st) |>
+  grep(
+    pattern = paste0(
+      "^(",
+      paste(measure_vars, collapse = "|"),
+      ")(_urb_ih|_urb_mur|_rur_ih|_rur_mur)?$"
+    ),
+    value = TRUE
+  )
  
 
 hpms_03_st_ct <- hpms_03_st %>%
-  group_by(state, county, f_system, year) %>%
-  summarise(vmt = sum(vmt), miles = sum(Section__Length), 
-            lane_miles = sum(lane_miles), lane_miles_expand = sum(lane_miles_expand), 
-            vmt_expand = sum(vmt_expand), vmt_com = sum(vmt_com), vmt_com_expand = sum(vmt_com_expand),
-            vmt_urban = sum(vmt_urban), vmt_rural=sum(vmt_rural), 
-            vmt_urban_expand = sum(vmt_urban_expand), vmt_rural_expand = sum(vmt_rural_expand),
-            vmt_urban_com_ex = sum(vmt_urban_com_ex), vmt_rural_com_ex = sum(vmt_rural_com_ex))
+  group_by(state, county, year) %>%
+  summarise(
+    miles = sum(miles, na.rm = TRUE),
+    across(all_of(measure_vars), ~ sum(.x, na.rm = TRUE)),
+    across(all_of(sum_vars), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
 
 rm(hpms_03_st, hpms_03, hpms_03_sample_for_merge, hpms_03_sample, hpms_03_uni )
 
@@ -258,7 +365,7 @@ hpms_13 <- sf::st_as_sf(data.table::rbindlist(shapefile_2013_list,  fill=TRUE))
 hpms_st13 <- hpms_13 %>%
   mutate(COUNTY_ID = county_cod, URBAN_ID = urban_code ) %>%
   filter(!is.na(URBAN_ID),!is.na(aadt_vn), !is.na(through_la)) %>%
-  filter_out(facility_t==7)  
+  filter_out(facility_t==7)  # these are planned but not yet built facilities 
  
 
 hpms_st13$length_m <- st_length(hpms_st13)
@@ -267,35 +374,65 @@ hpms_st13$length_miles <- set_units(hpms_st13$length_m, "mi")
 
 hpms_st13 <- hpms_st13 %>% mutate(is_sample = ifelse(is.na(is_sample), 0, is_sample))
 
-hpms_st13 <- hpms_st13 %>%
-  mutate(miles = end_point - begin_poin,
-         THROUGH_LANES = as.numeric(through_la),
-         lane_miles = miles * THROUGH_LANES,
-         lane_miles_expand = if_else(!is.na(expansion_), miles * THROUGH_LANES * expansion_, miles*THROUGH_LANES),
-         vmt = aadt_vn*miles, 
-         vmt_expand = if_else(!is.na(expansion_), aadt_vn*miles*expansion_, aadt_vn*miles),
-         lane_miles_urban = if_else(urban_code!=99999, lane_miles, 0), 
-         lane_miles_rural = if_else(urban_code==99999, lane_miles, 0),
-         lane_miles_urban_expand = if_else(urban_code!=99999 , lane_miles_expand, 0), 
-         lane_miles_rural_expand = if_else(urban_code==99999, lane_miles_expand, 0),
-         vmt_urban = if_else(urban_code!=99999, vmt, 0),
-         vmt_rural = if_else(urban_code==99999, vmt, 0),
-         vmt_urban_expand = if_else(urban_code!=99999, vmt_expand, 0),
-         vmt_rural_expand = if_else(urban_code==99999, vmt_expand, 0),
-         RouteID = id, 
+measure_vars_13 <- c( # I do not yet have commercial information for 2013
+  "lane_miles",
+  "lane_miles_exp",
+  "vmt",
+  "vmt_exp"
+)
+
+
+hpms_13_st <- hpms_st13 %>%
+  rename(RouteID = id, 
          AADT = aadt_vn,
          f_system = f_system_v, 
          county = county_cod, 
-         state=state_code) 
-    
+         state=state_code) %>%
+  mutate(year = 2013,
+         miles = end_point - begin_poin,
+         through_la = as.numeric(through_la),
+         lane_miles = miles * through_la,
+         lane_miles_exp = if_else(!is.na(expansion_), miles * through_la * expansion_, miles*through_la),
+         vmt = AADT*miles, 
+         vmt_exp = if_else(!is.na(expansion_), AADT*miles*expansion_, AADT*miles),
+         urb = urban_code != 99999,
+         ih  = f_system == 1)%>%
+    mutate(
+    across(
+      all_of(measure_vars_13),
+      list(
+        urb_ih  = ~ if_else( urb &  ih, ., 0),
+        urb_mur = ~ if_else( urb & !ih, ., 0),
+        rur_ih  = ~ if_else(!urb &  ih, ., 0),
+        rur_mur = ~ if_else(!urb & !ih, ., 0)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
+
+         
+ sum_vars <- names(hpms_13_st) |>
+  grep(
+    pattern = paste0(
+      "^(",
+      paste(measure_vars, collapse = "|"),
+      ")(_urb_ih|_urb_mur|_rur_ih|_rur_mur)?$"
+    ),
+    value = TRUE
+  )
  
-hpms_13_st_ct <- hpms_st13 %>%
-  filter(!f_system == "NULL") %>%
-  mutate(year = 2013) %>%
-  group_by(state, county, f_system, year) %>%
-  summarise(vmt = sum(vmt, na.rm = TRUE), vmt_urban = sum(vmt_urban, na.rm=TRUE), vmt_rural = sum(vmt_rural, na.rm=TRUE), 
-            miles = sum(miles, na.rm = TRUE), lane_miles = sum(lane_miles, na.rm = TRUE), lane_miles_expand = sum(lane_miles_expand), 
-            lane_miles_urban = sum(lane_miles_urban, na.rm=TRUE), lane_miles_rural=sum(lane_miles_rural, na.rm=TRUE))
+
+hpms_13_st_ct <- hpms_13_st %>%
+  group_by(state, county, year) %>%
+  summarise(
+    miles = sum(miles, na.rm = TRUE),
+    across(all_of(measure_vars_13), ~ sum(.x, na.rm = TRUE)),
+    across(all_of(sum_vars), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+
+ 
+ 
 
 hpms_13_st_ct <- as.data.frame(hpms_13_st_ct) %>% select(-geometry)
 
@@ -335,7 +472,8 @@ list_23 <- list(hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms
 hpms_23 <- sf::st_as_sf(data.table::rbindlist(list_23,  fill=TRUE, ignore.attr=TRUE))
 
 #converting the NULLS to NA 
-hpms_23 <- hpms_23 %>% mutate(IS_SAMPLE = ifelse(IS_SAMPLE=="NULL", 0, IS_SAMPLE),
+hpms_23 <- hpms_23 %>% 
+  mutate(IS_SAMPLE = ifelse(IS_SAMPLE=="NULL", 0, IS_SAMPLE),
                               F_SYSTEM = ifelse(F_SYSTEM=="NULL", NA, F_SYSTEM),
                               COUNTY_ID = ifelse(COUNTY_ID=="NULL", NA, COUNTY_ID),
                               URBAN_ID = ifelse(URBAN_ID=="NULL", NA, URBAN_ID),
@@ -353,7 +491,8 @@ hpms_st23 <- hpms_23 %>%
          !is.na(F_SYSTEM),
          !is.na(AADT_SINGLE_UNIT),
          !is.na(AADT_COMBINATION),
-         FACILITY_TYPE!=7) 
+         !is.na(FACILITY_TYPE),
+         FACILITY_TYPE!=7) # planned but not yet built facilities 
  
 
 #https://www.fhwa.dot.gov/policyinformation/hpms/softwareguide/hpms_software_guide.pdf
@@ -364,52 +503,71 @@ hpms_st23 <- hpms_23 %>%
 # hpms_st23$length_miles <- set_units(hpms_st23$length_m, "mi")
 
 #creating the data for actual use and select down to 
+
 hpms_st23 <- hpms_st23 %>%
-  mutate(miles = EndPoint - BeginPoint,
+  st_drop_geometry()  
+
+hpms_st23 <- as.data.frame(hpms_st23)
+ 
+measure_vars_23 <- c( ## missing expansion factors currently
+  "lane_miles",
+  "vmt",
+  "vmt_com"
+)
+
+hpms_23_st <- hpms_st23 %>%
+  filter(!is.na(COUNTY_ID)) %>%
+  rename(f_system=F_SYSTEM, county = COUNTY_ID, state = StateID) %>%
+  mutate(year = 2023,
+         f_system = as.numeric(f_system),
+         urb = URBAN_ID!=99999,
+         ih= f_system ==1,
+         miles = EndPoint - BeginPoint,
          through_la = as.numeric(THROUGH_LANES),
          lane_miles = miles * through_la,
          AADT = as.numeric(AADT),
          AADT_SINGLE_UNIT = as.numeric(AADT_SINGLE_UNIT),
          AADT_COMBINATION = as.numeric(AADT_COMBINATION),
          AADT_com = AADT_COMBINATION+AADT_SINGLE_UNIT,
-         lane_miles_urban = if_else(URBAN_ID!=99999, lane_miles, 0),
-         lane_miles_rural = if_else(URBAN_ID==99999, lane_miles,0),
-         AADT_urban = if_else(URBAN_ID!=99999, AADT, 0),
-         AADT_rural = if_else(URBAN_ID==99999, AADT, 0),
-         AADT_com_urban = if_else(URBAN_ID!=99999, AADT_com, 0),
-         AADT_com_rural = if_else(URBAN_ID==99999, AADT_com, 0)) %>%
-  select(RouteID, StateID, COUNTY_ID, URBAN_ID, AADT, miles,
-         lane_miles, F_SYSTEM, Shape_Length, through_la, 
-         AADT_urban, AADT_rural, lane_miles_urban, lane_miles_rural,
-         AADT_com, AADT_com_urban, AADT_com_rural)
+         through_la = as.numeric(THROUGH_LANES),
+         lane_miles = miles * through_la,
+         vmt = AADT * miles,
+         vmt_com = AADT_com * miles) %>%
+    mutate(
+    across(
+      all_of(measure_vars_23),
+      list(
+        urb_ih  = ~ if_else( urb &  ih, ., 0),
+        urb_mur = ~ if_else( urb & !ih, ., 0),
+        rur_ih  = ~ if_else(!urb &  ih, ., 0),
+        rur_mur = ~ if_else(!urb & !ih, ., 0)
+      ),
+      .names = "{.col}_{.fn}"
+    )
+  )
 
-hpms_st23 <- hpms_st23 %>%
-  st_drop_geometry()  
-
+         
+ sum_vars <- names(hpms_23_st) |>
+  grep(
+    pattern = paste0(
+      "^(",
+      paste(measure_vars, collapse = "|"),
+      ")(_urb_ih|_urb_mur|_rur_ih|_rur_mur)?$"
+    ),
+    value = TRUE
+  )
  
-# hpms_st23 <- hpms_st23 %>% filter(!is.na(through_la))
-# hpms_st23 <- hpms_st23 %>% filter(!is.na(f_system)) 
 
-
-hpms_st23 <- as.data.frame(hpms_st23)
-
-hpms_23_st_ct <- hpms_st23 %>%
-  filter(!is.na(COUNTY_ID)) %>%
-  mutate(year = 2023,
-         county = COUNTY_ID,
-         state = StateID,
-         vmt = as.numeric(AADT) * miles,
-         vmt_urban = AADT_urban * miles,
-         vmt_rural = AADT_rural * miles,
-         vmt_com = AADT_com * miles,
-         vmt_com_urb = AADT_com_urban * miles,
-         vmt_com_rul = AADT_com_rural * miles,
-         f_system = as.numeric(F_SYSTEM)) %>%
-  group_by(state, county, f_system, year) %>%
-  summarise(vmt = sum(vmt, na.rm = TRUE), vmt_urban = sum(vmt_urban, na.rm=TRUE), vmt_rural = sum(vmt_rural, na.rm=TRUE), 
-            miles = sum(miles, na.rm = TRUE), lane_miles = sum(lane_miles, na.rm = TRUE),
-            lane_miles_urban = sum(lane_miles_urban, na.rm=TRUE), lane_miles_rural=sum(lane_miles_rural, na.rm=TRUE))
-
+hpms_23_st_ct <- hpms_23_st %>%
+  group_by(state, county, year) %>%
+  summarise(
+    miles = sum(miles, na.rm = TRUE),
+    across(all_of(measure_vars_23), ~ sum(.x, na.rm = TRUE)),
+    across(all_of(sum_vars), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  )
+         
+ 
 
 rm(list_23, hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms_23_wa, hpms_23_ut, hpms_23_id, feilds, hpms_23)
 
@@ -421,10 +579,11 @@ rm(list_23, hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms_23_
 
 hpms_st_ct <- bind_rows(hpms_83_st_ct, hpms_93_st_ct, hpms_03_st_ct, hpms_13_st_ct, hpms_23_st_ct)
 
-
-
-
-
+hpms_st_ct <- hpms_st_ct %>%
+  mutate(FIPS = state*1000+county) %>%
+  rename(statefp= state,
+         countyfp = county)
+  
 ```
 
 

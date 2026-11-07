@@ -390,7 +390,9 @@ Emp_TS <- bind_rows(NHGIS_1980_merge, NHGIS_1990_merge, NHGIS_2000_merge, NHGIS_
 ```{r}
 
 NHGIS_Data <- NHGIS_TS %>%
-  left_join(Emp_TS, by = c("FIPS", "YEAR"))
+  left_join(Emp_TS, by = c("FIPS", "YEAR")) %>%
+  rename(year = YEAR)
+
 
  
 
