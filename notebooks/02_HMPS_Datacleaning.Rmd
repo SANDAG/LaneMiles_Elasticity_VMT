@@ -17,6 +17,7 @@ library("dplyr") # data cleaning and handling
 library("modelsummary") # outputing results where needed
 library("sf") # handles shapefiles
 library("units") # converts units of messure 
+library("tidyverse")
 
 # Load project configuration
 source(here::here("R", "load_config.R"))
@@ -24,12 +25,14 @@ cfg <- load_config()
 
 # Define HPMS input 
 
+
 HPMS_dir <- file.path(
   cfg$paths$input_dir,
   cfg$hpms$data_dir_HPMS
 )
 
 selected_states <- c(6, 41, 53, 4, 49, 32, 16, 35)
+#selected_states <- c(41)
 
 stopifnot(dir.exists(HPMS_dir))
 ```
@@ -47,9 +50,9 @@ files_1983 <- list.files(
 
 files_1983
 
-hpms_83_uni <- read.csv(files_1983[[1]])
+hpms_83_uni <- read.csv(files_1983[[2]])
 
-hpms_83_sample <- read.csv(files_1983[[2]])
+hpms_83_sample <- read.csv(files_1983[[1]])
 
 #taking only what we need from 1983 sample.  The sample is a perfect subset of the 
 # universal data, and many variables are repeated so no reason to just merge them all
@@ -57,8 +60,32 @@ hpms_83_sample <- read.csv(files_1983[[2]])
 # the functional class variable.  Also calculating the percent commercial vehicles 
 # by averaging the peak and off peak trucks since no breakdown into single or
 # combination trucks are available 
+
+
+# hpms_83_sample_for_merge <- hpms_83_sample %>%
+#   group_by(SECTION.IDENTIFICATION) %>%
+#   filter(n() > 1) %>%
+#   ungroup()
+
 hpms_83_sample_for_merge <-hpms_83_sample %>% 
-  mutate( Section.Identification = SECTION.IDENTIFICATION,
+  filter(STATE.FIPS.CODE %in% selected_states) %>%
+    filter_out(is.na(AADT), 
+             is.na(SECTION.GROUPED.LENGTH),
+             is.na(COUNTY.FIPS.CODE),
+             FEDERAL.AID.SYSTEM.STATUS!=1) %>% # For some reason built facilities are coded as 1, planned as 0 and not in the NHS as 8
+  rename(Section.Identification = SECTION.IDENTIFICATION,
+         county= COUNTY.FIPS.CODE)%>%
+  mutate( 
+          Merge_ID = case_when(
+                               STATE.FIPS.CODE == 4 ~ str_c("AZ", Section.Identification),
+                               STATE.FIPS.CODE == 6 ~ str_c("CA", Section.Identification), 
+                               STATE.FIPS.CODE == 16 ~ str_c("ID", Section.Identification),
+                               STATE.FIPS.CODE == 32 ~ str_c("NV", Section.Identification),
+                               STATE.FIPS.CODE == 35 ~ str_c("NM", Section.Identification),
+                               STATE.FIPS.CODE == 41 ~ str_c("OR", Section.Identification),
+                               STATE.FIPS.CODE == 49 ~ str_c("UT", Section.Identification),
+                               STATE.FIPS.CODE == 53 ~ str_c("WA", Section.Identification),
+                               TRUE ~ NA ),
          f_system = case_when(FUNCTIONAL.CLASS==1 | FUNCTIONAL.CLASS==11 ~ 1,
                               FUNCTIONAL.CLASS==2 | FUNCTIONAL.CLASS==12 ~ 2,
                               FUNCTIONAL.CLASS==6 | FUNCTIONAL.CLASS==14 ~ 3,
@@ -66,11 +93,47 @@ hpms_83_sample_for_merge <-hpms_83_sample %>%
                               FUNCTIONAL.CLASS==8 | FUNCTIONAL.CLASS==17 ~ 5,
                               FUNCTIONAL.CLASS==9 | FUNCTIONAL.CLASS==19 ~ 6),
          avg_truck = rowMeans(pick(PEAK.PERCENT.TRUCKS,OFF.PEAK.PERCENT.TRUCKS), na.rm=TRUE) ) %>%
-  select(Section.Identification, EXPANSION.FACTOR, PEAK.PERCENT.TRUCKS, OFF.PEAK.PERCENT.TRUCKS, FUNCTIONAL.CLASS, f_system, avg_truck)
+  filter(f_system ==1) %>%
+  select(Section.Identification,
+         EXPANSION.FACTOR,
+         PEAK.PERCENT.TRUCKS,
+         OFF.PEAK.PERCENT.TRUCKS,
+         FUNCTIONAL.CLASS, 
+         f_system,
+         avg_truck,
+         Merge_ID,
+         county)
 
- 
+
+hpms_83_uni_for_merge <- hpms_83_uni %>%  
+  filter(State.FIPS.Code %in% selected_states) %>%
+  filter_out(is.na(AADT), 
+             is.na(Section.Grouped.Length),
+             is.na(County.FIPS.Code),
+             Federal.aid.System.Status!=1) %>% # For some reason built facilities are coded as 1, planned as 0 and not in the NHS as 8
+  rename(county = County.FIPS.Code) %>%
+  mutate(Merge_ID = case_when(
+                               State.FIPS.Code == 4 ~ str_c("AZ", Section.Identification),
+                               State.FIPS.Code == 6 ~ str_c("CA", Section.Identification), 
+                               State.FIPS.Code == 16 ~ str_c("ID", Section.Identification),
+                               State.FIPS.Code == 32 ~ str_c("NV", Section.Identification),
+                               State.FIPS.Code == 35 ~ str_c("NM", Section.Identification),
+                               State.FIPS.Code == 41 ~ str_c("OR", Section.Identification),
+                               State.FIPS.Code == 49 ~ str_c("UT", Section.Identification),
+                               State.FIPS.Code == 53 ~ str_c("WA", Section.Identification),
+                               TRUE ~ NA ), 
+                  f_system = case_when(Functional.Class==1 | Functional.Class==11 ~ 1,
+                              Functional.Class==2 | Functional.Class==12 ~ 2,
+                              Functional.Class==6 | Functional.Class==14 ~ 3,
+                              Functional.Class==7 | Functional.Class==16 ~ 4,
+                              Functional.Class==8 | Functional.Class==17 ~ 5,
+                              Functional.Class==9 | Functional.Class==19 ~ 6),) %>%
+  filter(f_system ==1)
+
+
 # combine into final 1983 data
-hpms_83 <- merge(hpms_83_uni, hpms_83_sample_for_merge, by="Section.Identification")
+hpms_83 <- left_join(hpms_83_uni_for_merge, hpms_83_sample_for_merge, by=c("Merge_ID","county", "f_system"))
+ 
 
 ## create a new dataset to filter and mutate 
 ## preferred variables are those with Expansion factor but calculating the 
@@ -87,9 +150,10 @@ measure_vars <- c(
   "vmt_com_exp"
 )
 
+
 hpms_83_st<- hpms_83 %>%
   filter(State.FIPS.Code %in% selected_states) %>%
-  rename(state = State.FIPS.Code, county = County.FIPS.Code, Perc_com = avg_truck,
+  rename(state = State.FIPS.Code, Perc_com = avg_truck,
          through_la = Number.of.Through.Lanes, miles = Section.Grouped.Length,
          expansion_factor=EXPANSION.FACTOR ) %>%
   mutate(
@@ -98,13 +162,14 @@ hpms_83_st<- hpms_83 %>%
     ih  = f_system == 1,
     lane_miles        = through_la*miles,
     lane_miles_exp = lane_miles * expansion_factor,
+    AADT             = as.integer(AADT),
     AADT_com          = AADT * Perc_com / 100,
     vmt               = AADT * miles,
     vmt_exp        = vmt * expansion_factor,
     vmt_com           = AADT_com * miles,
     vmt_com_exp    = vmt_com * expansion_factor
   ) %>%
-    mutate(
+  mutate(
     across(
       all_of(measure_vars),
       list(
@@ -143,7 +208,7 @@ hpms_83_st_ct <- hpms_83_st %>%
 
 ## drop the dataframes we do not want
  
-rm(hpms_83, hpms_83_st, hpms_83_uni, hpms_83_sample, hpms_83_sample_for_merge)
+#rm(hpms_83, hpms_83_st, hpms_83_uni, hpms_83_sample, hpms_83_sample_for_merge)
 
 
 
@@ -170,13 +235,44 @@ hpms_93_sample <- read.csv(files_1993[[1]])
 
 #taking only what we need from 1993 sample.  The sample is a perfect subset of the 
 # universal data, and many variables are repeated so no reason to just merge them all
-hpms_93_sample_for_merge <-hpms_93_sample %>% 
-  select(SECTION.ID, STANDARD.EXPANSION.FACTOR, COMB.COMM.VEH.AVERAGE, SINGLE.UNIT.VEH.AVERAGE)
+hpms_93_sample_for_merge <-hpms_93_sample %>%
+  filter(STATE %in% selected_states,
+         NATIONAL.HIGHWAY.SYSTEM==1) %>%
+  rename(f_system = GEN.FUNCTIONAL.SYSTEM) %>%
+  mutate(Merge_ID = case_when(
+                               STATE == 4 ~ str_c("AZ", SECTION.ID),
+                               STATE == 6 ~ str_c("CA", SECTION.ID), 
+                               STATE == 16 ~ str_c("ID", SECTION.ID),
+                               STATE == 32 ~ str_c("NV", SECTION.ID),
+                               STATE == 35 ~ str_c("NM", SECTION.ID),
+                               STATE == 41 ~ str_c("OR", SECTION.ID),
+                               STATE == 49 ~ str_c("UT", SECTION.ID),
+                               STATE == 53 ~ str_c("WA", SECTION.ID),
+                               TRUE ~ NA )) %>%
+  filter(f_system==1) %>%
+  select(f_system, Merge_ID, SECTION.ID, STANDARD.EXPANSION.FACTOR, COMB.COMM.VEH.AVERAGE, SINGLE.UNIT.VEH.AVERAGE) 
 
+  
+hpms_93_uni_for_merge <- hpms_93_uni %>%
+  filter(STATE %in% selected_states,
+         NATIONAL.HIGHWAY.SYSTEM==1) %>%
+  rename(f_system = GEN.FUNCTIONAL.SYSTEM) %>%
+    mutate(Merge_ID = case_when(
+                               STATE == 4 ~ str_c("AZ", SECTION.ID),
+                               STATE == 6 ~ str_c("CA", SECTION.ID), 
+                               STATE == 16 ~ str_c("ID", SECTION.ID),
+                               STATE == 32 ~ str_c("NV", SECTION.ID),
+                               STATE == 35 ~ str_c("NM", SECTION.ID),
+                               STATE == 41 ~ str_c("OR", SECTION.ID),
+                               STATE == 49 ~ str_c("UT", SECTION.ID),
+                               STATE == 53 ~ str_c("WA", SECTION.ID),
+                               TRUE ~ NA )) %>%
+  filter(f_system ==1)
  
 # combine into final 2003 data
-hpms_93 <- merge(hpms_93_uni, hpms_93_sample_for_merge, by="SECTION.ID")
 
+hpms_93 <- left_join(hpms_93_uni_for_merge, hpms_93_sample_for_merge, by=c("Merge_ID","f_system"))
+ 
 ## create a new dataset to filter and mutate 
 ## preferred variables are those with Expansion factor but calculating the 
 ## non-expansion factor as well to run a robustness check as complex survey 
@@ -193,9 +289,15 @@ measure_vars <- c(
   "vmt_com_exp"
 )
 
+
+# hpms_93 <- hpms_93 %>%
+#   group_by_all() %>%
+#   filter(n() > 1) %>%
+#   ungroup()
+
 hpms_93_st<- hpms_93 %>%
   filter(STATE %in% selected_states) %>%
-  rename(state = STATE, county = COUNTY, f_system = GEN.FUNCTIONAL.SYSTEM, 
+  rename(state = STATE, county = COUNTY,  
          through_la = NUMBER.OF.LANES, miles = SECTION.LENGTH,
          expansion_factor=STANDARD.EXPANSION.FACTOR ) %>%
   mutate(
@@ -205,13 +307,18 @@ hpms_93_st<- hpms_93 %>%
     ih  = f_system == 1,
     lane_miles        = through_la*miles,
     lane_miles_exp = lane_miles * expansion_factor,
+    AADT              = as.integer(AADT),
     AADT_com          = AADT * Perc_com / 100,
     vmt               = AADT * miles,
     vmt_exp        = vmt * expansion_factor,
     vmt_com           = AADT_com * miles,
     vmt_com_exp    = vmt_com * expansion_factor
   ) %>%
-    mutate(
+  filter_out(is.na(AADT), 
+             is.na(miles),
+             is.na(county),
+             UNBUILT.FACILITY!=1) %>% # For some reason built facilities are coded as 1, planned as 0 and not in the NHS as 2
+  mutate(
     across(
       all_of(measure_vars),
       list(
@@ -250,7 +357,7 @@ hpms_93_st_ct <- hpms_93_st %>%
 
 
 
-rm(hpms_93, hpms_93_st, hpms_93_sample_for_merge, hpms_93_sample, hpms_93_uni)
+#rm(hpms_93, hpms_93_st, hpms_93_sample_for_merge, hpms_93_sample, hpms_93_uni)
 
 ```
 ## 2003 HPMS data
@@ -270,13 +377,41 @@ hpms_03_uni <- read.csv(files_2003[[2]])
 
 hpms_03_sample <- read.csv(files_2003[[1]])
 
-hpms_03_sample_for_merge <-hpms_03_sample %>% select(SECTION_ID, STD_EXP_FACTOR, PERC_COMBINATION, PERC_SINGLE_UNIT)
+hpms_03_sample_for_merge <-hpms_03_sample %>%
+  filter(STATE_CODE %in% selected_states, NHS==1) %>%
+  mutate(Merge_ID = case_when(
+                               STATE_CODE == 4 ~ str_c("AZ", SECTION_ID),
+                               STATE_CODE == 6 ~ str_c("CA", SECTION_ID), 
+                               STATE_CODE == 16 ~ str_c("ID", SECTION_ID),
+                               STATE_CODE == 32 ~ str_c("NV", SECTION_ID),
+                               STATE_CODE == 35 ~ str_c("NM", SECTION_ID),
+                               STATE_CODE == 41 ~ str_c("OR", SECTION_ID),
+                               STATE_CODE == 49 ~ str_c("UT", SECTION_ID),
+                               STATE_CODE == 53 ~ str_c("WA", SECTION_ID),
+                               TRUE ~ NA )) %>%
+  rename(Section_ID = SECTION_ID, f_system = GF_SYSTEM) %>%
+  filter(f_system==1) %>%
+  select(f_system, Merge_ID, Section_ID, STD_EXP_FACTOR, PERC_COMBINATION, PERC_SINGLE_UNIT)
 
-# rename merging ID
-names(hpms_03_sample_for_merge)[names(hpms_03_sample_for_merge) == 'SECTION_ID'] <- 'Section_ID'
+hpms_03_uni_for_merge <- hpms_03_uni %>%
+  rename(f_system = GF_System) %>% 
+  filter(State_Code %in% selected_states, NHS==1) %>%
+    mutate(Merge_ID = case_when(
+                               State_Code == 4 ~ str_c("AZ", Section_ID),
+                               State_Code == 6 ~ str_c("CA", Section_ID), 
+                               State_Code == 16 ~ str_c("ID", Section_ID),
+                               State_Code == 32 ~ str_c("NV", Section_ID),
+                               State_Code == 35 ~ str_c("NM", Section_ID),
+                               State_Code == 41 ~ str_c("OR", Section_ID),
+                               State_Code == 49 ~ str_c("UT", Section_ID),
+                               State_Code == 53 ~ str_c("WA", Section_ID),
+                               TRUE ~ NA )) %>%
+  filter(f_system==1)
+
+
 
 # combine into final 2003 data
-hpms_03 <- merge(hpms_03_uni, hpms_03_sample_for_merge, by="Section_ID")
+hpms_03 <- left_join(hpms_03_uni_for_merge, hpms_03_sample_for_merge, by=c("Merge_ID", "f_system"))
 
 
 measure_vars <- c(
@@ -288,9 +423,10 @@ measure_vars <- c(
   "vmt_com_exp"
 )
 
+
 hpms_03_st<- hpms_03 %>%
   filter(State_Code %in% selected_states) %>%
-  rename(state = State_Code, county = County_Code, f_system = GF_System,
+  rename(state = State_Code, county = County_Code, 
          through_la = Through_Lanes, miles = Section__Length,
          expansion_factor=STD_EXP_FACTOR ) %>%
   mutate(
@@ -298,15 +434,21 @@ hpms_03_st<- hpms_03 %>%
     Perc_com = PERC_COMBINATION+PERC_SINGLE_UNIT,
     urb = Rural.Urban != 1,
     ih  = f_system == 1,
+    miles = as.integer(miles),
     lane_miles        = through_la*miles,
     lane_miles_exp = lane_miles * expansion_factor,
+    AADT              = as.integer(AADT),
     AADT_com          = AADT * Perc_com / 100,
     vmt               = AADT * miles,
     vmt_exp        = vmt * expansion_factor,
     vmt_com           = AADT_com * miles,
     vmt_com_exp    = vmt_com * expansion_factor
   ) %>%
-    mutate(
+  filter_out(is.na(AADT), 
+             is.na(miles),
+             is.na(county),
+             Unbuilt_Facility!=1) %>% # For some reason built faculties are coded as 1, planned as 0 and not in the NHS as 2
+  mutate(
     across(
       all_of(measure_vars),
       list(
@@ -344,7 +486,7 @@ hpms_03_st_ct <- hpms_03_st %>%
   )
 
 
-rm(hpms_03_st, hpms_03, hpms_03_sample_for_merge, hpms_03_sample, hpms_03_uni )
+#rm(hpms_03_st, hpms_03, hpms_03_sample_for_merge, hpms_03_sample, hpms_03_uni )
 
 ```
 ## 2013 
@@ -362,6 +504,13 @@ hpms_13 <- sf::st_as_sf(data.table::rbindlist(shapefile_2013_list,  fill=TRUE))
  
 
 # all states
+
+hpms_13 <- hpms_13 %>%
+  group_by_all() %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+
 hpms_st13 <- hpms_13 %>%
   mutate(COUNTY_ID = county_cod, URBAN_ID = urban_code ) %>%
   filter(!is.na(URBAN_ID),!is.na(aadt_vn), !is.na(through_la)) %>%
@@ -470,6 +619,12 @@ hpms_23_nm <- rename(hpms_23_nm, feilds)
 list_23 <- list(hpms_23_ca, hpms_23_az, hpms_23_nm, hpms_23_nv, hpms_23_or, hpms_23_wa, hpms_23_ut, hpms_23_id)
 
 hpms_23 <- sf::st_as_sf(data.table::rbindlist(list_23,  fill=TRUE, ignore.attr=TRUE))
+
+hpms_23 <- hpms_23 %>%
+  group_by_all() %>%
+  filter(n() > 1) %>%
+  ungroup()
+
 
 #converting the NULLS to NA 
 hpms_23 <- hpms_23 %>% 
